@@ -461,7 +461,13 @@ fn print_next_steps(out: *std.Io.Writer, has_api_key: bool, env_var: []const u8,
 // ── Quick setup ──────────────────────────────────────────────────
 
 /// Non-interactive setup: generates a sensible default config.
-pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provider: ?[]const u8, memory_backend: ?[]const u8) !void {
+pub fn runQuickSetup(
+    allocator: std.mem.Allocator,
+    api_key: ?[]const u8,
+    provider: ?[]const u8,
+    memory_backend: ?[]const u8,
+    model_override: ?[]const u8,
+) !void {
     const zh = is_zh_ui();
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
@@ -497,8 +503,11 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
     }
     if (memory_backend) |mb| cfg.memory.backend = mb;
 
-    // Set default model based on provider
-    if (cfg.default_model == null or std.mem.eql(u8, cfg.default_model.?, "anthropic/claude-sonnet-4")) {
+    // Optional explicit model override takes highest priority.
+    if (model_override) |m| {
+        cfg.default_model = try cfg.ownedAllocator().dupe(u8, m);
+    } else if (cfg.default_model == null or std.mem.eql(u8, cfg.default_model.?, "anthropic/claude-sonnet-4")) {
+        // Otherwise set default model based on provider.
         cfg.default_model = defaultModelForProvider(cfg.default_provider);
     }
 
@@ -773,9 +782,9 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         }
     }
     if (zh) {
-        try out.print("  选择 [1] 或输入模型名 [{s}]: ", .{selected_provider.default_model});
+        try out.print("  选择 [1] 或输入模型名（支持自定义）[{s}]: ", .{selected_provider.default_model});
     } else {
-        try out.print("  Choice [1] or model name [{s}]: ", .{selected_provider.default_model});
+        try out.print("  Choice [1] or custom model name [{s}]: ", .{selected_provider.default_model});
     }
     const model_input = prompt(out, &input_buf, "", "") orelse {
         try out.writeAll(aborted_msg);

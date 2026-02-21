@@ -975,6 +975,7 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
     var api_key: ?[]const u8 = null;
     var provider: ?[]const u8 = null;
     var memory_backend: ?[]const u8 = null;
+    var model: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < sub_args.len) : (i += 1) {
@@ -991,6 +992,9 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
         } else if (std.mem.eql(u8, sub_args[i], "--memory") and i + 1 < sub_args.len) {
             i += 1;
             memory_backend = sub_args[i];
+        } else if (std.mem.eql(u8, sub_args[i], "--model") and i + 1 < sub_args.len) {
+            i += 1;
+            model = sub_args[i];
         }
     }
 
@@ -999,7 +1003,7 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
     } else if (interactive) {
         try yc.onboard.runWizard(allocator);
     } else {
-        try yc.onboard.runQuickSetup(allocator, api_key, provider, memory_backend);
+        try yc.onboard.runQuickSetup(allocator, api_key, provider, memory_backend, model);
     }
 }
 
@@ -1331,7 +1335,7 @@ fn printUsage() void {
         \\  help        Show this help
         \\
         \\OPTIONS:
-        \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--memory MEM]
+        \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--memory MEM] [--model MODEL]
         \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP]
         \\  gateway [--port PORT] [--host HOST]
         \\  daemon [--port PORT] [--host HOST]
@@ -1367,7 +1371,7 @@ fn printUsage() void {
         \\  help        显示帮助
         \\
         \\选项:
-        \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--memory MEM]
+        \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--memory MEM] [--model MODEL]
         \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP]
         \\  gateway [--port PORT] [--host HOST]
         \\  daemon [--port PORT] [--host HOST]
