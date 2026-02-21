@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const RateTracker = @import("tracker.zig").RateTracker;
 
 /// How much autonomy the agent has
@@ -61,10 +62,13 @@ pub const default_allowed_commands = [_][]const u8{
 
 /// Default forbidden paths
 pub const default_forbidden_paths = [_][]const u8{
-    "/etc",     "/root",  "/home",     "/usr",  "/bin",
-    "/sbin",    "/lib",   "/opt",      "/boot", "/dev",
-    "/proc",    "/sys",   "/var",      "/tmp",  "~/.ssh",
-    "~/.gnupg", "~/.aws", "~/.config",
+    "/etc",                    "/root",           "/home",              "/usr",             "/bin",
+    "/sbin",                   "/lib",            "/opt",               "/boot",            "/dev",
+    "/proc",                   "/sys",            "/var",               "/tmp",             "~/.ssh",
+    "~/.gnupg",                "~/.aws",          "~/.config",
+    // Windows sensitive/system paths
+             "C:\\Windows",      "C:\\Program Files",
+    "C:\\Program Files (x86)", "C:\\ProgramData", "C:\\Users\\Default", "C:\\$Recycle.Bin", "C:\\System Volume Information",
 };
 
 /// Security policy enforced on all tool executions
@@ -233,14 +237,18 @@ pub const SecurityPolicy = struct {
         // Block URL-encoded traversal
         var lower_buf: [4096]u8 = undefined;
         const lower = toLowerSlice(path, &lower_buf);
-        if (containsStr(lower, "..%2f") or containsStr(lower, "%2f..")) return false;
+        if (containsStr(lower, "..%2f") or containsStr(lower, "%2f..") or
+            containsStr(lower, "..%5c") or containsStr(lower, "%5c.."))
+        {
+            return false;
+        }
 
         // Expand tilde
         var expanded_buf: [4096]u8 = undefined;
         const expanded = expandTilde(path, &expanded_buf);
 
         // Block absolute paths when workspace_only is set
-        if (self.workspace_only and expanded.len > 0 and expanded[0] == '/') return false;
+        if (self.workspace_only and std.fs.path.isAbsolute(expanded)) return false;
 
         // Block forbidden paths
         var fb_buf: [4096]u8 = undefined;
@@ -345,7 +353,7 @@ fn skipEnvAssignments(s: []const u8) []const u8 {
 
 /// Extract basename from a path (everything after last '/')
 fn extractBasename(path: []const u8) []const u8 {
-    if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
+    if (std.mem.lastIndexOfAny(u8, path, "/\\")) |idx| {
         return path[idx + 1 ..];
     }
     return path;
@@ -414,18 +422,49 @@ fn isCargoMediumVerb(verb: []const u8) bool {
 
 /// Check if a path has ".." as a component
 fn hasParentDirComponent(path: []const u8) bool {
-    var iter = std.mem.splitScalar(u8, path, '/');
+    var iter = std.mem.tokenizeAny(u8, path, "/\\");
     while (iter.next()) |component| {
         if (std.mem.eql(u8, component, "..")) return true;
     }
     return false;
 }
 
-/// Expand ~ to HOME env var
+/// Expand ~ to HOME/USERPROFILE/HOMEDRIVE+HOMEPATH.
 fn expandTilde(path: []const u8, buf: []u8) []const u8 {
-    if (path.len >= 2 and path[0] == '~' and path[1] == '/') {
+    if (path.len < 2 or path[0] != '~' or (path[1] != '/' and path[1] != '\\')) {
+        return path;
+    }
+
+    const rest = path[1..];
+
+    if (builtin.os.tag == .windows) {
+        const pa = std.heap.page_allocator;
+
+        if (std.process.getEnvVarOwned(pa, "USERPROFILE")) |home| {
+            defer pa.free(home);
+            const total = home.len + rest.len;
+            if (total <= buf.len) {
+                @memcpy(buf[0..home.len], home);
+                @memcpy(buf[home.len..][0..rest.len], rest);
+                return buf[0..total];
+            }
+        } else |_| {}
+
+        if (std.process.getEnvVarOwned(pa, "HOMEDRIVE")) |drive| {
+            defer pa.free(drive);
+            if (std.process.getEnvVarOwned(pa, "HOMEPATH")) |home_path| {
+                defer pa.free(home_path);
+                const total = drive.len + home_path.len + rest.len;
+                if (total <= buf.len) {
+                    @memcpy(buf[0..drive.len], drive);
+                    @memcpy(buf[drive.len..][0..home_path.len], home_path);
+                    @memcpy(buf[drive.len + home_path.len ..][0..rest.len], rest);
+                    return buf[0..total];
+                }
+            } else |_| {}
+        } else |_| {}
+    } else {
         if (std.posix.getenv("HOME")) |home| {
-            const rest = path[1..]; // includes the '/'
             const total = home.len + rest.len;
             if (total <= buf.len) {
                 @memcpy(buf[0..home.len], home);
@@ -434,6 +473,7 @@ fn expandTilde(path: []const u8, buf: []u8) []const u8 {
             }
         }
     }
+
     return path;
 }
 
@@ -441,10 +481,19 @@ fn expandTilde(path: []const u8, buf: []u8) []const u8 {
 fn pathStartsWith(path: []const u8, prefix: []const u8) bool {
     if (prefix.len == 0) return false;
     if (path.len < prefix.len) return false;
-    if (!std.mem.eql(u8, path[0..prefix.len], prefix)) return false;
+    if (builtin.os.tag == .windows) {
+        var path_buf: [4096]u8 = undefined;
+        var prefix_buf: [4096]u8 = undefined;
+        const lower_path = toLowerSlice(path[0..prefix.len], &path_buf);
+        const lower_prefix = toLowerSlice(prefix, &prefix_buf);
+        if (!std.mem.eql(u8, lower_path, lower_prefix)) return false;
+    } else {
+        if (!std.mem.eql(u8, path[0..prefix.len], prefix)) return false;
+    }
     // Must match at component boundary
     if (path.len == prefix.len) return true;
-    return path[prefix.len] == '/';
+    const sep = path[prefix.len];
+    return sep == '/' or sep == '\\';
 }
 
 /// Check for dangerous arguments that allow sub-command execution.
@@ -725,6 +774,13 @@ test "forbidden paths blocked" {
     try std.testing.expect(!p.isPathAllowed("~/.gnupg/pubring.kbx"));
 }
 
+test "windows forbidden paths blocked case-insensitively" {
+    if (builtin.os.tag != .windows) return;
+    const p = SecurityPolicy{ .workspace_only = false };
+    try std.testing.expect(!p.isPathAllowed("c:\\windows\\system32\\drivers\\etc\\hosts"));
+    try std.testing.expect(!p.isPathAllowed("c:\\program files\\app\\file.txt"));
+}
+
 test "empty path allowed" {
     const p = SecurityPolicy{};
     try std.testing.expect(p.isPathAllowed(""));
@@ -916,6 +972,8 @@ test "url encoded path traversal blocked" {
     const p = SecurityPolicy{};
     try std.testing.expect(!p.isPathAllowed("..%2fetc/passwd"));
     try std.testing.expect(!p.isPathAllowed("%2f..%2fetc/passwd"));
+    try std.testing.expect(!p.isPathAllowed("..%5cWindows%5cSystem32"));
+    try std.testing.expect(!p.isPathAllowed("%5c..%5csecret"));
 }
 
 test "tilde paths handled" {
@@ -940,12 +998,16 @@ test "workspace only blocks all absolute paths" {
     const p = SecurityPolicy{ .workspace_only = true };
     try std.testing.expect(!p.isPathAllowed("/any/path"));
     try std.testing.expect(!p.isPathAllowed("/home/user/file"));
+    if (builtin.os.tag == .windows) {
+        try std.testing.expect(!p.isPathAllowed("C:\\Windows\\System32\\cmd.exe"));
+    }
 }
 
 test "nested relative paths allowed" {
     const p = SecurityPolicy{};
     try std.testing.expect(p.isPathAllowed("a/b/c/d/e.txt"));
     try std.testing.expect(p.isPathAllowed("src/security/policy.zig"));
+    try std.testing.expect(!p.isPathAllowed("a\\..\\secret.txt"));
 }
 
 // ── Validate command execution ──────────────────────────────────

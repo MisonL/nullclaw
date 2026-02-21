@@ -127,7 +127,7 @@ fn readOpenclawMarkdownEntries(
     stats: *MigrationStats,
 ) !void {
     // Core memory file
-    const core_path = try std.fmt.allocPrint(allocator, "{s}/MEMORY.md", .{source});
+    const core_path = try std.fs.path.join(allocator, &.{ source, "MEMORY.md" });
     defer allocator.free(core_path);
 
     if (std.fs.cwd().readFileAlloc(allocator, core_path, 1024 * 1024)) |content| {
@@ -137,7 +137,7 @@ fn readOpenclawMarkdownEntries(
     } else |_| {}
 
     // Daily logs
-    const daily_dir = try std.fmt.allocPrint(allocator, "{s}/memory", .{source});
+    const daily_dir = try std.fs.path.join(allocator, &.{ source, "memory" });
     defer allocator.free(daily_dir);
 
     if (std.fs.cwd().openDir(daily_dir, .{ .iterate = true })) |*dir_handle| {
@@ -146,7 +146,7 @@ fn readOpenclawMarkdownEntries(
         var iter = dir.iterate();
         while (try iter.next()) |entry| {
             if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
-            const fpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ daily_dir, entry.name });
+            const fpath = try std.fs.path.join(allocator, &.{ daily_dir, entry.name });
             defer allocator.free(fpath);
             if (std.fs.cwd().readFileAlloc(allocator, fpath, 1024 * 1024)) |content| {
                 defer allocator.free(content);
@@ -223,9 +223,39 @@ fn parseStructuredLine(line: []const u8) struct { key: ?[]const u8, value: ?[]co
 /// Resolve the OpenClaw workspace directory.
 fn resolveOpenclawWorkspace(allocator: std.mem.Allocator, source: ?[]const u8) ![]u8 {
     if (source) |src| return allocator.dupe(u8, src);
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoHomeDir;
+    const home = getHomeDir(allocator) catch return error.NoHomeDir;
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.openclaw/workspace", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".openclaw", "workspace" });
+}
+
+fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(drive);
+
+    const path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    return std.fs.path.join(allocator, &.{ drive, path });
 }
 
 /// Check if two paths refer to the same location.

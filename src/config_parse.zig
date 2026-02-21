@@ -21,14 +21,15 @@ pub fn parseStringArray(allocator: std.mem.Allocator, arr: std.json.Array) ![]co
 
 /// Parse JSON content into the given Config.
 pub fn parseJson(self: *Config, content: []const u8) !void {
-    const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, content, .{});
+    const owned_alloc = self.ownedAllocator();
+    const parsed = try std.json.parseFromSlice(std.json.Value, owned_alloc, content, .{});
     defer parsed.deinit();
 
     const root = parsed.value.object;
 
     // Top-level fields
     if (root.get("default_provider")) |v| {
-        if (v == .string) self.default_provider = try self.allocator.dupe(u8, v.string);
+        if (v == .string) self.default_provider = try owned_alloc.dupe(u8, v.string);
     }
     // default_model parsed below from agents.defaults.model.primary
     if (root.get("default_temperature")) |v| {
@@ -43,7 +44,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("model_routes")) |v| {
         if (v == .array) {
             var list: std.ArrayListUnmanaged(types.ModelRouteConfig) = .empty;
-            try list.ensureTotalCapacity(self.allocator, @intCast(v.array.items.len));
+            try list.ensureTotalCapacity(owned_alloc, @intCast(v.array.items.len));
             for (v.array.items) |item| {
                 if (item == .object) {
                     const hint = item.object.get("hint") orelse continue;
@@ -51,17 +52,17 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     const model = item.object.get("model") orelse continue;
                     if (hint != .string or provider != .string or model != .string) continue;
                     var route = types.ModelRouteConfig{
-                        .hint = try self.allocator.dupe(u8, hint.string),
-                        .provider = try self.allocator.dupe(u8, provider.string),
-                        .model = try self.allocator.dupe(u8, model.string),
+                        .hint = try owned_alloc.dupe(u8, hint.string),
+                        .provider = try owned_alloc.dupe(u8, provider.string),
+                        .model = try owned_alloc.dupe(u8, model.string),
                     };
                     if (item.object.get("api_key")) |ak| {
-                        if (ak == .string) route.api_key = try self.allocator.dupe(u8, ak.string);
+                        if (ak == .string) route.api_key = try owned_alloc.dupe(u8, ak.string);
                     }
-                    try list.append(self.allocator, route);
+                    try list.append(owned_alloc, route);
                 }
             }
-            self.model_routes = try list.toOwnedSlice(self.allocator);
+            self.model_routes = try list.toOwnedSlice(owned_alloc);
         }
     }
 
@@ -75,7 +76,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     if (defaults.object.get("model")) |mdl| {
                         if (mdl == .object) {
                             if (mdl.object.get("primary")) |v| {
-                                if (v == .string) self.default_model = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) self.default_model = try owned_alloc.dupe(u8, v.string);
                             }
                         }
                     }
@@ -115,7 +116,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             if (agents_val.object.get("list")) |list_val| {
                 if (list_val == .array) {
                     var list: std.ArrayListUnmanaged(types.NamedAgentConfig) = .empty;
-                    try list.ensureTotalCapacity(self.allocator, @intCast(list_val.array.items.len));
+                    try list.ensureTotalCapacity(owned_alloc, @intCast(list_val.array.items.len));
                     for (list_val.array.items) |item| {
                         if (item == .object) {
                             // "id" or "name" for the agent name
@@ -137,15 +138,15 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             if (model_str == null) continue;
 
                             var agent_cfg = types.NamedAgentConfig{
-                                .name = try self.allocator.dupe(u8, name_val.string),
-                                .provider = try self.allocator.dupe(u8, provider.string),
-                                .model = try self.allocator.dupe(u8, model_str.?),
+                                .name = try owned_alloc.dupe(u8, name_val.string),
+                                .provider = try owned_alloc.dupe(u8, provider.string),
+                                .model = try owned_alloc.dupe(u8, model_str.?),
                             };
                             if (item.object.get("system_prompt")) |sp| {
-                                if (sp == .string) agent_cfg.system_prompt = try self.allocator.dupe(u8, sp.string);
+                                if (sp == .string) agent_cfg.system_prompt = try owned_alloc.dupe(u8, sp.string);
                             }
                             if (item.object.get("api_key")) |ak| {
-                                if (ak == .string) agent_cfg.api_key = try self.allocator.dupe(u8, ak.string);
+                                if (ak == .string) agent_cfg.api_key = try owned_alloc.dupe(u8, ak.string);
                             }
                             if (item.object.get("temperature")) |t| {
                                 if (t == .float) agent_cfg.temperature = t.float;
@@ -154,10 +155,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             if (item.object.get("max_depth")) |md| {
                                 if (md == .integer) agent_cfg.max_depth = @intCast(md.integer);
                             }
-                            try list.append(self.allocator, agent_cfg);
+                            try list.append(owned_alloc, agent_cfg);
                         }
                     }
-                    self.agents = try list.toOwnedSlice(self.allocator);
+                    self.agents = try list.toOwnedSlice(owned_alloc);
                 }
             }
         }
@@ -176,13 +177,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (cmd != .string) continue;
 
                 var mcp_cfg = types.McpServerConfig{
-                    .name = try self.allocator.dupe(u8, server_name),
-                    .command = try self.allocator.dupe(u8, cmd.string),
+                    .name = try owned_alloc.dupe(u8, server_name),
+                    .command = try owned_alloc.dupe(u8, cmd.string),
                 };
 
                 // args: string array
                 if (val.object.get("args")) |a| {
-                    if (a == .array) mcp_cfg.args = try parseStringArray(self.allocator, a.array);
+                    if (a == .array) mcp_cfg.args = try parseStringArray(owned_alloc, a.array);
                 }
 
                 // env: object of string→string
@@ -192,19 +193,19 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         var eit = e.object.iterator();
                         while (eit.next()) |ee| {
                             if (ee.value_ptr.* == .string) {
-                                try env_list.append(self.allocator, .{
-                                    .key = try self.allocator.dupe(u8, ee.key_ptr.*),
-                                    .value = try self.allocator.dupe(u8, ee.value_ptr.string),
+                                try env_list.append(owned_alloc, .{
+                                    .key = try owned_alloc.dupe(u8, ee.key_ptr.*),
+                                    .value = try owned_alloc.dupe(u8, ee.value_ptr.string),
                                 });
                             }
                         }
-                        mcp_cfg.env = try env_list.toOwnedSlice(self.allocator);
+                        mcp_cfg.env = try env_list.toOwnedSlice(owned_alloc);
                     }
                 }
 
-                try mcp_list.append(self.allocator, mcp_cfg);
+                try mcp_list.append(owned_alloc, mcp_cfg);
             }
-            self.mcp_servers = try mcp_list.toOwnedSlice(self.allocator);
+            self.mcp_servers = try mcp_list.toOwnedSlice(owned_alloc);
         }
     }
 
@@ -212,15 +213,15 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("diagnostics")) |diag| {
         if (diag == .object) {
             if (diag.object.get("backend")) |v| {
-                if (v == .string) self.diagnostics.backend = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.diagnostics.backend = try owned_alloc.dupe(u8, v.string);
             }
             if (diag.object.get("otel")) |otel| {
                 if (otel == .object) {
                     if (otel.object.get("endpoint")) |v| {
-                        if (v == .string) self.diagnostics.otel_endpoint = try self.allocator.dupe(u8, v.string);
+                        if (v == .string) self.diagnostics.otel_endpoint = try owned_alloc.dupe(u8, v.string);
                     }
                     if (otel.object.get("service_name")) |v| {
-                        if (v == .string) self.diagnostics.otel_service_name = try self.allocator.dupe(u8, v.string);
+                        if (v == .string) self.diagnostics.otel_service_name = try owned_alloc.dupe(u8, v.string);
                     }
                 }
             }
@@ -257,13 +258,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 }
             }
             if (aut.object.get("allowed_commands")) |v| {
-                if (v == .array) self.autonomy.allowed_commands = try parseStringArray(self.allocator, v.array);
+                if (v == .array) self.autonomy.allowed_commands = try parseStringArray(owned_alloc, v.array);
             }
             if (aut.object.get("forbidden_paths")) |v| {
-                if (v == .array) self.autonomy.forbidden_paths = try parseStringArray(self.allocator, v.array);
+                if (v == .array) self.autonomy.forbidden_paths = try parseStringArray(owned_alloc, v.array);
             }
             if (aut.object.get("allowed_paths")) |v| {
-                if (v == .array) self.autonomy.allowed_paths = try parseStringArray(self.allocator, v.array);
+                if (v == .array) self.autonomy.allowed_paths = try parseStringArray(owned_alloc, v.array);
             }
         }
     }
@@ -272,15 +273,15 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("runtime")) |rt| {
         if (rt == .object) {
             if (rt.object.get("kind")) |v| {
-                if (v == .string) self.runtime.kind = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.runtime.kind = try owned_alloc.dupe(u8, v.string);
             }
             if (rt.object.get("docker")) |dk| {
                 if (dk == .object) {
                     if (dk.object.get("image")) |v| {
-                        if (v == .string) self.runtime.docker.image = try self.allocator.dupe(u8, v.string);
+                        if (v == .string) self.runtime.docker.image = try owned_alloc.dupe(u8, v.string);
                     }
                     if (dk.object.get("network")) |v| {
-                        if (v == .string) self.runtime.docker.network = try self.allocator.dupe(u8, v.string);
+                        if (v == .string) self.runtime.docker.network = try owned_alloc.dupe(u8, v.string);
                     }
                     if (dk.object.get("memory_limit_mb")) |v| {
                         if (v == .integer) self.runtime.docker.memory_limit_mb = @intCast(v.integer);
@@ -351,7 +352,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .bool) self.agent.parallel_tools = v.bool;
             }
             if (ag.object.get("tool_dispatcher")) |v| {
-                if (v == .string) self.agent.tool_dispatcher = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.agent.tool_dispatcher = try owned_alloc.dupe(u8, v.string);
             }
             if (ag.object.get("session_idle_timeout_secs")) |v| {
                 if (v == .integer) self.agent.session_idle_timeout_secs = @intCast(v.integer);
@@ -395,7 +396,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                 if (v == .bool) self.audio_media.enabled = v.bool;
                             }
                             if (audio.object.get("language")) |v| {
-                                if (v == .string) self.audio_media.language = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) self.audio_media.language = try owned_alloc.dupe(u8, v.string);
                             }
                             // models[0] → provider, model, base_url, language (override)
                             if (audio.object.get("models")) |models| {
@@ -403,16 +404,16 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                     const m0 = models.array.items[0];
                                     if (m0 == .object) {
                                         if (m0.object.get("provider")) |v| {
-                                            if (v == .string) self.audio_media.provider = try self.allocator.dupe(u8, v.string);
+                                            if (v == .string) self.audio_media.provider = try owned_alloc.dupe(u8, v.string);
                                         }
                                         if (m0.object.get("model")) |v| {
-                                            if (v == .string) self.audio_media.model = try self.allocator.dupe(u8, v.string);
+                                            if (v == .string) self.audio_media.model = try owned_alloc.dupe(u8, v.string);
                                         }
                                         if (m0.object.get("base_url")) |v| {
-                                            if (v == .string) self.audio_media.base_url = try self.allocator.dupe(u8, v.string);
+                                            if (v == .string) self.audio_media.base_url = try owned_alloc.dupe(u8, v.string);
                                         }
                                         if (m0.object.get("language")) |v| {
-                                            if (v == .string) self.audio_media.language = try self.allocator.dupe(u8, v.string);
+                                            if (v == .string) self.audio_media.language = try owned_alloc.dupe(u8, v.string);
                                         }
                                     }
                                 }
@@ -428,7 +429,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("memory")) |mem| {
         if (mem == .object) {
             if (mem.object.get("backend")) |v| {
-                if (v == .string) self.memory.backend = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.memory.backend = try owned_alloc.dupe(u8, v.string);
             }
             if (mem.object.get("auto_save")) |v| {
                 if (v == .bool) self.memory.auto_save = v.bool;
@@ -446,10 +447,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .integer) self.memory.conversation_retention_days = @intCast(v.integer);
             }
             if (mem.object.get("embedding_provider")) |v| {
-                if (v == .string) self.memory.embedding_provider = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.memory.embedding_provider = try owned_alloc.dupe(u8, v.string);
             }
             if (mem.object.get("embedding_model")) |v| {
-                if (v == .string) self.memory.embedding_model = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.memory.embedding_model = try owned_alloc.dupe(u8, v.string);
             }
             if (mem.object.get("embedding_dimensions")) |v| {
                 if (v == .integer) self.memory.embedding_dimensions = @intCast(v.integer);
@@ -494,7 +495,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .integer) self.gateway.port = @intCast(v.integer);
             }
             if (gw.object.get("host")) |v| {
-                if (v == .string) self.gateway.host = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.gateway.host = try owned_alloc.dupe(u8, v.string);
             }
             if (gw.object.get("require_pairing")) |v| {
                 if (v == .bool) self.gateway.require_pairing = v.bool;
@@ -512,7 +513,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .integer) self.gateway.idempotency_ttl_secs = @intCast(v.integer);
             }
             if (gw.object.get("paired_tokens")) |v| {
-                if (v == .array) self.gateway.paired_tokens = try parseStringArray(self.allocator, v.array);
+                if (v == .array) self.gateway.paired_tokens = try parseStringArray(owned_alloc, v.array);
             }
         }
     }
@@ -544,13 +545,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("identity")) |id| {
         if (id == .object) {
             if (id.object.get("format")) |v| {
-                if (v == .string) self.identity.format = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.identity.format = try owned_alloc.dupe(u8, v.string);
             }
             if (id.object.get("aieos_path")) |v| {
-                if (v == .string) self.identity.aieos_path = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.identity.aieos_path = try owned_alloc.dupe(u8, v.string);
             }
             if (id.object.get("aieos_inline")) |v| {
-                if (v == .string) self.identity.aieos_inline = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.identity.aieos_inline = try owned_alloc.dupe(u8, v.string);
             }
         }
     }
@@ -562,10 +563,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .bool) self.composio.enabled = v.bool;
             }
             if (comp.object.get("api_key")) |v| {
-                if (v == .string) self.composio.api_key = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.composio.api_key = try owned_alloc.dupe(u8, v.string);
             }
             if (comp.object.get("entity_id")) |v| {
-                if (v == .string) self.composio.entity_id = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.composio.entity_id = try owned_alloc.dupe(u8, v.string);
             }
         }
     }
@@ -586,22 +587,22 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .bool) self.browser.enabled = v.bool;
             }
             if (br.object.get("backend")) |v| {
-                if (v == .string) self.browser.backend = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.browser.backend = try owned_alloc.dupe(u8, v.string);
             }
             if (br.object.get("native_headless")) |v| {
                 if (v == .bool) self.browser.native_headless = v.bool;
             }
             if (br.object.get("native_webdriver_url")) |v| {
-                if (v == .string) self.browser.native_webdriver_url = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.browser.native_webdriver_url = try owned_alloc.dupe(u8, v.string);
             }
             if (br.object.get("native_chrome_path")) |v| {
-                if (v == .string) self.browser.native_chrome_path = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.browser.native_chrome_path = try owned_alloc.dupe(u8, v.string);
             }
             if (br.object.get("session_name")) |v| {
-                if (v == .string) self.browser.session_name = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.browser.session_name = try owned_alloc.dupe(u8, v.string);
             }
             if (br.object.get("allowed_domains")) |v| {
-                if (v == .array) self.browser.allowed_domains = try parseStringArray(self.allocator, v.array);
+                if (v == .array) self.browser.allowed_domains = try parseStringArray(owned_alloc, v.array);
             }
         }
     }
@@ -628,13 +629,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .bool) self.hardware.enabled = v.bool;
             }
             if (hw.object.get("serial_port")) |v| {
-                if (v == .string) self.hardware.serial_port = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.hardware.serial_port = try owned_alloc.dupe(u8, v.string);
             }
             if (hw.object.get("baud_rate")) |v| {
                 if (v == .integer) self.hardware.baud_rate = @intCast(v.integer);
             }
             if (hw.object.get("probe_target")) |v| {
-                if (v == .string) self.hardware.probe_target = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.hardware.probe_target = try owned_alloc.dupe(u8, v.string);
             }
             if (hw.object.get("workspace_datasheets")) |v| {
                 if (v == .bool) self.hardware.workspace_datasheets = v.bool;
@@ -662,7 +663,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 if (v == .bool) self.peripherals.enabled = v.bool;
             }
             if (per.object.get("datasheet_dir")) |v| {
-                if (v == .string) self.peripherals.datasheet_dir = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.peripherals.datasheet_dir = try owned_alloc.dupe(u8, v.string);
             }
         }
     }
@@ -716,7 +717,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         if (v == .bool) self.security.audit.enabled = v.bool;
                     }
                     if (aud.object.get("log_path")) |v| {
-                        if (v == .string) self.security.audit.log_path = try self.allocator.dupe(u8, v.string);
+                        if (v == .string) self.security.audit.log_path = try owned_alloc.dupe(u8, v.string);
                     }
                     if (aud.object.get("max_size_mb")) |v| {
                         if (v == .integer) self.security.audit.max_size_mb = @intCast(v.integer);
@@ -733,7 +734,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
     if (root.get("tunnel")) |tun| {
         if (tun == .object) {
             if (tun.object.get("provider")) |v| {
-                if (v == .string) self.tunnel.provider = try self.allocator.dupe(u8, v.string);
+                if (v == .string) self.tunnel.provider = try owned_alloc.dupe(u8, v.string);
             }
         }
     }
@@ -750,17 +751,17 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         const val = entry.value_ptr.*;
                         if (val != .object) continue;
                         var pe = types.ProviderEntry{
-                            .name = try self.allocator.dupe(u8, prov_name),
+                            .name = try owned_alloc.dupe(u8, prov_name),
                         };
                         if (val.object.get("api_key")) |ak| {
-                            if (ak == .string) pe.api_key = try self.allocator.dupe(u8, ak.string);
+                            if (ak == .string) pe.api_key = try owned_alloc.dupe(u8, ak.string);
                         }
                         if (val.object.get("base_url")) |ab| {
-                            if (ab == .string) pe.base_url = try self.allocator.dupe(u8, ab.string);
+                            if (ab == .string) pe.base_url = try owned_alloc.dupe(u8, ab.string);
                         }
-                        try prov_list.append(self.allocator, pe);
+                        try prov_list.append(owned_alloc, pe);
                     }
-                    self.providers = try prov_list.toOwnedSlice(self.allocator);
+                    self.providers = try prov_list.toOwnedSlice(owned_alloc);
                 }
             }
         }
@@ -791,18 +792,18 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     if (getFirstAccount(tg.object)) |acc| {
                         if (acc.get("bot_token")) |tok| {
                             if (tok == .string) {
-                                self.channels.telegram = .{ .bot_token = try self.allocator.dupe(u8, tok.string) };
+                                self.channels.telegram = .{ .bot_token = try owned_alloc.dupe(u8, tok.string) };
                             }
                         }
                         if (self.channels.telegram) |*tg_cfg| {
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) tg_cfg.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) tg_cfg.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                             if (acc.get("reply_in_private")) |v| {
                                 if (v == .bool) tg_cfg.reply_in_private = v.bool;
                             }
                             if (acc.get("proxy")) |v| {
-                                if (v == .string) tg_cfg.proxy = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) tg_cfg.proxy = try owned_alloc.dupe(u8, v.string);
                             }
                         }
                     }
@@ -815,15 +816,15 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     if (getFirstAccount(disc.object)) |acc| {
                         if (acc.get("token")) |tok| {
                             if (tok == .string) {
-                                self.channels.discord = .{ .token = try self.allocator.dupe(u8, tok.string) };
+                                self.channels.discord = .{ .token = try owned_alloc.dupe(u8, tok.string) };
                             }
                         }
                         if (self.channels.discord) |*dc| {
                             if (acc.get("guild_id")) |v| {
-                                if (v == .string) dc.guild_id = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) dc.guild_id = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) dc.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) dc.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                             if (acc.get("allow_bots")) |v| {
                                 if (v == .bool) dc.allow_bots = v.bool;
@@ -845,24 +846,24 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     if (getFirstAccount(sl.object)) |acc| {
                         if (acc.get("bot_token")) |tok| {
                             if (tok == .string) {
-                                self.channels.slack = .{ .bot_token = try self.allocator.dupe(u8, tok.string) };
+                                self.channels.slack = .{ .bot_token = try owned_alloc.dupe(u8, tok.string) };
                             }
                         }
                         if (self.channels.slack) |*sc| {
                             if (acc.get("app_token")) |v| {
-                                if (v == .string) sc.app_token = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) sc.app_token = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("channel_id")) |v| {
-                                if (v == .string) sc.channel_id = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) sc.channel_id = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) sc.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) sc.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                             if (acc.get("dm_policy")) |v| {
-                                if (v == .string) sc.dm_policy = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) sc.dm_policy = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("group_policy")) |v| {
-                                if (v == .string) sc.group_policy = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) sc.group_policy = try owned_alloc.dupe(u8, v.string);
                             }
                         }
                     }
@@ -877,30 +878,30 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         const nick = acc.get("nick") orelse break :irc_blk;
                         if (host != .string or nick != .string) break :irc_blk;
                         self.channels.irc = .{
-                            .host = try self.allocator.dupe(u8, host.string),
-                            .nick = try self.allocator.dupe(u8, nick.string),
+                            .host = try owned_alloc.dupe(u8, host.string),
+                            .nick = try owned_alloc.dupe(u8, nick.string),
                         };
                         if (self.channels.irc) |*ic| {
                             if (acc.get("port")) |v| {
                                 if (v == .integer) ic.port = @intCast(v.integer);
                             }
                             if (acc.get("username")) |v| {
-                                if (v == .string) ic.username = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) ic.username = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("channels")) |v| {
-                                if (v == .array) ic.channels = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) ic.channels = try parseStringArray(owned_alloc, v.array);
                             }
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) ic.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) ic.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                             if (acc.get("server_password")) |v| {
-                                if (v == .string) ic.server_password = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) ic.server_password = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("nickserv_password")) |v| {
-                                if (v == .string) ic.nickserv_password = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) ic.nickserv_password = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("sasl_password")) |v| {
-                                if (v == .string) ic.sasl_password = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) ic.sasl_password = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("tls")) |v| {
                                 if (v == .bool) ic.tls = v.bool;
@@ -919,13 +920,13 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         const rid = acc.get("room_id") orelse break :mx_blk;
                         if (hs != .string or at != .string or rid != .string) break :mx_blk;
                         self.channels.matrix = .{
-                            .homeserver = try self.allocator.dupe(u8, hs.string),
-                            .access_token = try self.allocator.dupe(u8, at.string),
-                            .room_id = try self.allocator.dupe(u8, rid.string),
+                            .homeserver = try owned_alloc.dupe(u8, hs.string),
+                            .access_token = try owned_alloc.dupe(u8, at.string),
+                            .room_id = try owned_alloc.dupe(u8, rid.string),
                         };
                         if (self.channels.matrix) |*mc| {
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) mc.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) mc.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                         }
                     }
@@ -941,16 +942,16 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         const vt = acc.get("verify_token") orelse break :wa_blk;
                         if (at != .string or pni != .string or vt != .string) break :wa_blk;
                         self.channels.whatsapp = .{
-                            .access_token = try self.allocator.dupe(u8, at.string),
-                            .phone_number_id = try self.allocator.dupe(u8, pni.string),
-                            .verify_token = try self.allocator.dupe(u8, vt.string),
+                            .access_token = try owned_alloc.dupe(u8, at.string),
+                            .phone_number_id = try owned_alloc.dupe(u8, pni.string),
+                            .verify_token = try owned_alloc.dupe(u8, vt.string),
                         };
                         if (self.channels.whatsapp) |*wc| {
                             if (acc.get("app_secret")) |v| {
-                                if (v == .string) wc.app_secret = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) wc.app_secret = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) wc.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) wc.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                         }
                     }
@@ -966,7 +967,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             if (v == .bool) ic.enabled = v.bool;
                         }
                         if (im.object.get("allow_from")) |v| {
-                            if (v == .array) ic.allow_from = try parseStringArray(self.allocator, v.array);
+                            if (v == .array) ic.allow_from = try parseStringArray(owned_alloc, v.array);
                         }
                     }
                 }
@@ -980,21 +981,21 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         const asec = acc.get("app_secret") orelse break :lk_blk;
                         if (aid != .string or asec != .string) break :lk_blk;
                         self.channels.lark = .{
-                            .app_id = try self.allocator.dupe(u8, aid.string),
-                            .app_secret = try self.allocator.dupe(u8, asec.string),
+                            .app_id = try owned_alloc.dupe(u8, aid.string),
+                            .app_secret = try owned_alloc.dupe(u8, asec.string),
                         };
                         if (self.channels.lark) |*lc| {
                             if (acc.get("encrypt_key")) |v| {
-                                if (v == .string) lc.encrypt_key = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) lc.encrypt_key = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("verification_token")) |v| {
-                                if (v == .string) lc.verification_token = try self.allocator.dupe(u8, v.string);
+                                if (v == .string) lc.verification_token = try owned_alloc.dupe(u8, v.string);
                             }
                             if (acc.get("use_feishu")) |v| {
                                 if (v == .bool) lc.use_feishu = v.bool;
                             }
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) lc.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) lc.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                             if (acc.get("receive_mode")) |v| {
                                 if (v == .string) {
@@ -1017,12 +1018,12 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         const csec = acc.get("client_secret") orelse break :dt_blk;
                         if (cid != .string or csec != .string) break :dt_blk;
                         self.channels.dingtalk = .{
-                            .client_id = try self.allocator.dupe(u8, cid.string),
-                            .client_secret = try self.allocator.dupe(u8, csec.string),
+                            .client_id = try owned_alloc.dupe(u8, cid.string),
+                            .client_secret = try owned_alloc.dupe(u8, csec.string),
                         };
                         if (self.channels.dingtalk) |*dc| {
                             if (acc.get("allow_from")) |v| {
-                                if (v == .array) dc.allow_from = try parseStringArray(self.allocator, v.array);
+                                if (v == .array) dc.allow_from = try parseStringArray(owned_alloc, v.array);
                             }
                         }
                     }
@@ -1038,7 +1039,7 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                             if (v == .integer) wc.port = @intCast(v.integer);
                         }
                         if (wh.object.get("secret")) |v| {
-                            if (v == .string) wc.secret = try self.allocator.dupe(u8, v.string);
+                            if (v == .string) wc.secret = try owned_alloc.dupe(u8, v.string);
                         }
                     }
                 }

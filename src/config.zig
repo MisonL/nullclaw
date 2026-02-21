@@ -62,6 +62,11 @@ pub const Config = struct {
     workspace_dir: []const u8,
     config_path: []const u8,
 
+    // Base allocator for paths and the arena itself
+    allocator: std.mem.Allocator,
+    // Optional arena allocator for config-owned allocations (preferred in load()).
+    // If null, allocations fall back to `allocator` and callers own field lifetimes.
+    arena: ?std.heap.ArenaAllocator = null,
     // Top-level fields
     providers: []const ProviderEntry = &.{},
     audio_media: AudioMediaConfig = .{},
@@ -111,8 +116,6 @@ pub const Config = struct {
     workspace_only: bool = true,
     max_actions_per_hour: u32 = 20,
 
-    allocator: std.mem.Allocator,
-
     /// Look up a provider's API key from the providers list.
     pub fn getProviderKey(self: *const Config, name: []const u8) ?[]const u8 {
         for (self.providers) |e| {
@@ -134,6 +137,14 @@ pub const Config = struct {
         return null;
     }
 
+    /// Allocator used for values owned by Config fields.
+    pub fn ownedAllocator(self: *Config) std.mem.Allocator {
+        if (self.arena) |*arena| {
+            return arena.allocator();
+        }
+        return self.allocator;
+    }
+
     /// Sync flat convenience fields from the nested sub-configs.
     pub fn syncFlatFields(self: *Config) void {
         self.temperature = self.default_temperature;
@@ -147,28 +158,35 @@ pub const Config = struct {
         self.max_actions_per_hour = self.autonomy.max_actions_per_hour;
     }
 
+    /// Free all dynamically allocated memory in this Config.
+    pub fn deinit(self: *Config) void {
+        if (self.arena) |*arena| {
+            arena.deinit();
+            self.arena = null;
+        }
+    }
+
     pub fn load(allocator: std.mem.Allocator) !Config {
-        const home = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
-            error.EnvironmentVariableNotFound => return error.NoHomeDir,
-            else => return err,
-        };
-        defer allocator.free(home);
-
-        const config_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
-        const config_path = try std.fs.path.join(allocator, &.{ config_dir, "config.json" });
-        const workspace_dir = try std.fs.path.join(allocator, &.{ config_dir, "workspace" });
-
         var cfg = Config{
-            .workspace_dir = workspace_dir,
-            .config_path = config_path,
+            .workspace_dir = "",
+            .config_path = "",
             .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
         };
+        errdefer cfg.deinit();
+        const arena_alloc = cfg.ownedAllocator();
+
+        const home = try getHomeDir(arena_alloc);
+
+        const config_dir = try std.fs.path.join(arena_alloc, &.{ home, ".nullclaw" });
+        cfg.workspace_dir = try std.fs.path.join(arena_alloc, &.{ config_dir, "workspace" });
+        cfg.config_path = try std.fs.path.join(arena_alloc, &.{ config_dir, "config.json" });
 
         // Try to read existing config file
-        if (std.fs.openFileAbsolute(config_path, .{})) |file| {
+        if (std.fs.openFileAbsolute(cfg.config_path, .{})) |file| {
             defer file.close();
-            const content = try file.readToEndAlloc(allocator, 1024 * 64);
-            defer allocator.free(content);
+            const content = try file.readToEndAlloc(arena_alloc, 1024 * 64);
+            defer arena_alloc.free(content);
             cfg.parseJson(content) catch {};
         } else |_| {
             // Config file doesn't exist yet — use defaults
@@ -185,7 +203,7 @@ pub const Config = struct {
 
     /// Parse a JSON array of strings into an allocated slice.
     pub fn parseStringArray(self: *Config, arr: std.json.Array) ![]const []const u8 {
-        return config_parse.parseStringArray(self.allocator, arr);
+        return config_parse.parseStringArray(self.ownedAllocator(), arr);
     }
 
     pub fn parseJson(self: *Config, content: []const u8) !void {
@@ -194,14 +212,15 @@ pub const Config = struct {
 
     /// Apply NULLCLAW_* environment variable overrides.
     pub fn applyEnvOverrides(self: *Config) void {
+        const owned_alloc = self.ownedAllocator();
         // Provider
-        if (std.process.getEnvVarOwned(self.allocator, "NULLCLAW_PROVIDER")) |prov| {
+        if (std.process.getEnvVarOwned(owned_alloc, "NULLCLAW_PROVIDER")) |prov| {
             self.default_provider = prov;
         } else |_| {}
 
         // Model
-        if (std.process.getEnvVarOwned(self.allocator, "NULLCLAW_MODEL")) |model| {
-            self.default_model = model;
+        if (std.process.getEnvVarOwned(owned_alloc, "NULLCLAW_MODEL")) |m| {
+            self.default_model = m;
         } else |_| {}
 
         // Temperature
@@ -223,13 +242,13 @@ pub const Config = struct {
         } else |_| {}
 
         // Gateway host
-        if (std.process.getEnvVarOwned(self.allocator, "NULLCLAW_GATEWAY_HOST")) |host| {
+        if (std.process.getEnvVarOwned(owned_alloc, "NULLCLAW_GATEWAY_HOST")) |host| {
             self.gateway.host = host;
         } else |_| {}
 
-        // Workspace
-        if (std.process.getEnvVarOwned(self.allocator, "NULLCLAW_WORKSPACE")) |ws| {
-            self.workspace_dir = ws;
+        // Default workspace/config overrides
+        if (std.process.getEnvVarOwned(owned_alloc, "NULLCLAW_WORKSPACE")) |dir| {
+            self.workspace_dir = dir;
         } else |_| {}
 
         // Allow public bind
@@ -448,6 +467,36 @@ pub const Config = struct {
     }
 };
 
+fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(drive);
+
+    const path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    return std.fs.path.join(allocator, &.{ drive, path });
+}
+
 // ── Tests ───────────────────────────────────────────────────────
 
 test "json parse roundtrip" {
@@ -517,6 +566,7 @@ test "validation rejects bad temperature" {
         .config_path = "/tmp/yc/config.json",
         .default_temperature = 5.0,
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try std.testing.expectError(Config.ValidationError.TemperatureOutOfRange, cfg.validate());
 }
@@ -526,6 +576,7 @@ test "validation rejects zero port" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     cfg.gateway.port = 0;
     try std.testing.expectError(Config.ValidationError.InvalidPort, cfg.validate());
@@ -536,6 +587,7 @@ test "validation passes for defaults" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try cfg.validate();
 }
@@ -545,6 +597,7 @@ test "syncFlatFields propagates nested values" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     cfg.default_temperature = 1.5;
     cfg.memory.backend = "lucid";
@@ -594,6 +647,7 @@ test "validation rejects negative temperature" {
         .config_path = "/tmp/yc/config.json",
         .default_temperature = -1.0,
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try std.testing.expectError(Config.ValidationError.TemperatureOutOfRange, cfg.validate());
 }
@@ -604,6 +658,7 @@ test "validation accepts boundary temperatures" {
         .config_path = "/tmp/yc/config.json",
         .default_temperature = 0.0,
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try cfg_zero.validate();
 
@@ -612,6 +667,7 @@ test "validation accepts boundary temperatures" {
         .config_path = "/tmp/yc/config.json",
         .default_temperature = 2.0,
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try cfg_two.validate();
 }
@@ -621,6 +677,7 @@ test "validation rejects excessive retries" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     cfg.reliability.provider_retries = 101;
     try std.testing.expectError(Config.ValidationError.InvalidRetryCount, cfg.validate());
@@ -631,6 +688,7 @@ test "validation rejects excessive backoff" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     cfg.reliability.provider_backoff_ms = 700_000;
     try std.testing.expectError(Config.ValidationError.InvalidBackoffMs, cfg.validate());
@@ -641,6 +699,7 @@ test "validation accepts max boundary retries" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     cfg.reliability.provider_retries = 100;
     try cfg.validate();
@@ -651,6 +710,7 @@ test "validation accepts max boundary backoff" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     cfg.reliability.provider_backoff_ms = 600_000;
     try cfg.validate();
@@ -1198,6 +1258,7 @@ test "getProviderKey returns null for missing provider" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try std.testing.expect(cfg.getProviderKey("nonexistent") == null);
     try std.testing.expect(cfg.defaultProviderKey() == null);
@@ -1208,6 +1269,7 @@ test "providers defaults to empty" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try std.testing.expectEqual(@as(usize, 0), cfg.providers.len);
 }
@@ -1217,6 +1279,7 @@ test "audio_media defaults" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try std.testing.expect(cfg.audio_media.enabled);
     try std.testing.expectEqualStrings("groq", cfg.audio_media.provider);

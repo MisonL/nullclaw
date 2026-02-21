@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const bus = @import("bus.zig");
 
 const log = std.log.scoped(.cron);
@@ -435,9 +436,10 @@ pub const CronScheduler = struct {
             switch (job.job_type) {
                 .shell => {
                     // Execute shell command via child process
+                    const argv = shellArgv(job.command);
                     const result = std.process.Child.run(.{
                         .allocator = self.allocator,
-                        .argv = &.{ "sh", "-c", job.command },
+                        .argv = &argv,
                     }) catch |err| {
                         log.err("cron job '{s}' failed to start: {}", .{ job.id, err });
                         job.last_status = "error";
@@ -576,16 +578,16 @@ const JsonCronJob = struct {
 
 /// Get the default cron.json path: ~/.nullclaw/cron.json
 fn cronJsonPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try resolveHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.nullclaw/cron.json", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "cron.json" });
 }
 
 /// Ensure the ~/.nullclaw directory exists.
 fn ensureCronDir(allocator: std.mem.Allocator) !void {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try resolveHomeDir(allocator);
     defer allocator.free(home);
-    const dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw", .{home});
+    const dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
     defer allocator.free(dir);
     std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -818,9 +820,10 @@ pub fn cliRunJob(allocator: std.mem.Allocator, id: []const u8) !void {
 
     if (scheduler.getJob(id)) |job| {
         log.info("Running job '{s}': {s}", .{ id, job.command });
+        const argv = shellArgv(job.command);
         const result = std.process.Child.run(.{
             .allocator = allocator,
-            .argv = &.{ "sh", "-c", job.command },
+            .argv = &argv,
         }) catch |err| {
             log.err("Job '{s}' failed: {s}", .{ id, @errorName(err) });
             return;
@@ -836,6 +839,43 @@ pub fn cliRunJob(allocator: std.mem.Allocator, id: []const u8) !void {
     } else {
         log.warn("Cron job '{s}' not found", .{id});
     }
+}
+
+fn shellArgv(command: []const u8) [3][]const u8 {
+    if (builtin.os.tag == .windows) {
+        return .{ "cmd", "/C", command };
+    }
+    return .{ "sh", "-c", command };
+}
+
+fn resolveHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(drive);
+
+    const path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    return std.fs.path.join(allocator, &.{ drive, path });
 }
 
 /// CLI: update a cron job's expression, command, or enabled state.

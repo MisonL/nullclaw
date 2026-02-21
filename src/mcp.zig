@@ -59,15 +59,18 @@ pub const McpServer = struct {
 
         // Build environment: inherit parent + config overrides
         var env = std.process.EnvMap.init(self.allocator);
-        // Add PATH, HOME, etc. from parent
+        // Add PATH, HOME, etc. from parent (cross-platform: works on Windows and POSIX)
         const inherit_vars = [_][]const u8{
             "PATH", "HOME",  "TERM",   "LANG",      "LC_ALL",            "LC_CTYPE",
             "USER", "SHELL", "TMPDIR", "NODE_PATH", "NPM_CONFIG_PREFIX",
         };
         for (&inherit_vars) |key| {
-            if (std.posix.getenv(key)) |val| {
-                try env.put(key, val);
-            }
+            const val = std.process.getEnvVarOwned(self.allocator, key) catch |err| switch (err) {
+                error.EnvironmentVariableNotFound => continue,
+                else => continue,
+            };
+            defer self.allocator.free(val);
+            try env.put(key, val);
         }
         // Config env overrides
         for (self.config.env) |entry| {

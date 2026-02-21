@@ -166,7 +166,7 @@ pub const StateManager = struct {
 
 /// Derive the default state file path from workspace dir.
 pub fn defaultStatePath(allocator: Allocator, workspace_dir: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/state.json", .{workspace_dir});
+    return std.fs.path.join(allocator, &.{ workspace_dir, "state.json" });
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -184,12 +184,26 @@ test "State init defaults to null" {
 }
 
 test "StateManager init and deinit — no leaks" {
-    var mgr = try StateManager.init(testing.allocator, "/tmp/test-state.json");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "test-state.json" });
+    defer testing.allocator.free(path);
+
+    var mgr = try StateManager.init(testing.allocator, path);
     mgr.deinit();
 }
 
 test "StateManager setLastChannel and getLastChannel" {
-    var mgr = try StateManager.init(testing.allocator, "/tmp/test-state.json");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "test-state.json" });
+    defer testing.allocator.free(path);
+
+    var mgr = try StateManager.init(testing.allocator, path);
     defer mgr.deinit();
 
     const before = mgr.getLastChannel();
@@ -203,7 +217,14 @@ test "StateManager setLastChannel and getLastChannel" {
 }
 
 test "StateManager setLastChannel overwrites previous" {
-    var mgr = try StateManager.init(testing.allocator, "/tmp/test-state.json");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "test-state.json" });
+    defer testing.allocator.free(path);
+
+    var mgr = try StateManager.init(testing.allocator, path);
     defer mgr.deinit();
 
     mgr.setLastChannel("telegram", "c1");
@@ -215,7 +236,14 @@ test "StateManager setLastChannel overwrites previous" {
 }
 
 test "StateManager updated_at is set" {
-    var mgr = try StateManager.init(testing.allocator, "/tmp/test-state.json");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "test-state.json" });
+    defer testing.allocator.free(path);
+
+    var mgr = try StateManager.init(testing.allocator, path);
     defer mgr.deinit();
 
     try testing.expectEqual(@as(i64, 0), mgr.getUpdatedAt());
@@ -224,8 +252,12 @@ test "StateManager updated_at is set" {
 }
 
 test "StateManager save and load roundtrip" {
-    const path = "/tmp/nullclaw-test-state-roundtrip.json";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "state-roundtrip.json" });
+    defer testing.allocator.free(path);
 
     // Save
     {
@@ -248,15 +280,26 @@ test "StateManager save and load roundtrip" {
 }
 
 test "StateManager load missing file is ok" {
-    var mgr = try StateManager.init(testing.allocator, "/tmp/nonexistent-state-12345.json");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "nonexistent-state.json" });
+    defer testing.allocator.free(path);
+
+    var mgr = try StateManager.init(testing.allocator, path);
     defer mgr.deinit();
     try mgr.load(); // should not error
     try testing.expect(mgr.getLastChannel().channel == null);
 }
 
 test "StateManager save with null values" {
-    const path = "/tmp/nullclaw-test-state-null.json";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "state-null.json" });
+    defer testing.allocator.free(path);
 
     {
         var mgr = try StateManager.init(testing.allocator, path);
@@ -275,8 +318,12 @@ test "StateManager save with null values" {
 }
 
 test "StateManager save overwrites previous file" {
-    const path = "/tmp/nullclaw-test-state-overwrite.json";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "state-overwrite.json" });
+    defer testing.allocator.free(path);
 
     var mgr = try StateManager.init(testing.allocator, path);
     defer mgr.deinit();
@@ -295,8 +342,12 @@ test "StateManager save overwrites previous file" {
 }
 
 test "StateManager handles special chars in values" {
-    const path = "/tmp/nullclaw-test-state-special.json";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "state-special.json" });
+    defer testing.allocator.free(path);
 
     {
         var mgr = try StateManager.init(testing.allocator, path);
@@ -314,7 +365,14 @@ test "StateManager handles special chars in values" {
 }
 
 test "StateManager concurrent setLastChannel" {
-    var mgr = try StateManager.init(testing.allocator, "/tmp/test-state-concurrent.json");
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+    const path = try std.fs.path.join(testing.allocator, &.{ base, "test-state-concurrent.json" });
+    defer testing.allocator.free(path);
+
+    var mgr = try StateManager.init(testing.allocator, path);
     defer mgr.deinit();
 
     const num_threads = 4;
@@ -337,7 +395,13 @@ test "StateManager concurrent setLastChannel" {
 }
 
 test "defaultStatePath" {
-    const path = try defaultStatePath(testing.allocator, "/home/user/.nullclaw");
+    const base = if (@import("builtin").os.tag == .windows)
+        "C:\\Users\\user\\.nullclaw"
+    else
+        "/home/user/.nullclaw";
+    const path = try defaultStatePath(testing.allocator, base);
     defer testing.allocator.free(path);
-    try testing.expectEqualStrings("/home/user/.nullclaw/state.json", path);
+    const expected = try std.fs.path.join(testing.allocator, &.{ base, "state.json" });
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, path);
 }
