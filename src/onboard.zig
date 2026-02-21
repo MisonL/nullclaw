@@ -59,6 +59,26 @@ pub const known_providers = [_]ProviderInfo{
     .{ .key = "ollama", .label = "Ollama (local)", .default_model = "llama3.2", .env_var = "API_KEY", .default_base_url = "http://localhost:11434" },
 };
 
+fn provider_label(provider: ProviderInfo, zh: bool) []const u8 {
+    if (!zh) return provider.label;
+    if (std.mem.eql(u8, provider.key, "openrouter")) return "OpenRouter（多提供商，推荐）";
+    if (std.mem.eql(u8, provider.key, "anthropic")) return "Anthropic（Claude 直连）";
+    if (std.mem.eql(u8, provider.key, "openai")) return "OpenAI（GPT 直连）";
+    if (std.mem.eql(u8, provider.key, "gemini")) return "Google Gemini";
+    if (std.mem.eql(u8, provider.key, "deepseek")) return "DeepSeek";
+    if (std.mem.eql(u8, provider.key, "groq")) return "Groq（高速推理）";
+    if (std.mem.eql(u8, provider.key, "ollama")) return "Ollama（本地）";
+    return provider.label;
+}
+
+fn provider_label_by_key(provider_key: []const u8, zh: bool) []const u8 {
+    const canonical = canonicalProviderName(provider_key);
+    for (known_providers) |provider| {
+        if (std.mem.eql(u8, provider.key, canonical)) return provider_label(provider, zh);
+    }
+    return provider_key;
+}
+
 /// Canonicalize provider name (handle aliases).
 pub fn canonicalProviderName(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "grok")) return "xai";
@@ -423,7 +443,7 @@ fn print_next_steps(out: *std.Io.Writer, has_api_key: bool, env_var: []const u8,
     if (!has_api_key) {
         if (builtin.os.tag == .windows) {
             if (zh) {
-                try out.print("    1. 设置 API Key (PowerShell):  $env:{s}=\"sk-...\"\n", .{env_var});
+                try out.print("    1. 设置 API 密钥 (PowerShell):  $env:{s}=\"sk-...\"\n", .{env_var});
                 try out.print("       或 Git Bash:                export {s}=\"sk-...\"\n", .{env_var});
                 try out.writeAll("    2. 对话:                       nullclaw agent -m \"你好！\"\n");
                 try out.writeAll("    3. 启动网关:                   nullclaw gateway\n");
@@ -435,7 +455,7 @@ fn print_next_steps(out: *std.Io.Writer, has_api_key: bool, env_var: []const u8,
             }
         } else {
             if (zh) {
-                try out.print("    1. 设置 API Key:  export {s}=\"sk-...\"\n", .{env_var});
+                try out.print("    1. 设置 API 密钥:  export {s}=\"sk-...\"\n", .{env_var});
                 try out.writeAll("    2. 对话:           nullclaw agent -m \"你好！\"\n");
                 try out.writeAll("    3. 启动网关:       nullclaw gateway\n");
             } else {
@@ -532,7 +552,7 @@ pub fn runQuickSetup(
     // Print summary
     if (zh) {
         try stdout.print("  [OK] 工作目录:   {s}\n", .{cfg.workspace_dir});
-        try stdout.print("  [OK] 提供商:     {s}\n", .{cfg.default_provider});
+        try stdout.print("  [OK] 提供商:     {s} ({s})\n", .{ cfg.default_provider, provider_label_by_key(cfg.default_provider, zh) });
     } else {
         try stdout.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
         try stdout.print("  [OK] Provider:   {s}\n", .{cfg.default_provider});
@@ -545,8 +565,8 @@ pub fn runQuickSetup(
         }
     }
     if (zh) {
-        try stdout.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "未设置（可用 --api-key 或编辑 config）"});
-        try stdout.print("  [OK] 记忆后端:   {s}\n", .{cfg.memory.backend});
+        try stdout.print("  [OK] API 密钥:   {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "未设置（可用 --api-key 或编辑 config）"});
+        try stdout.print("  [OK] 记忆后端:   {s}\n", .{memory_backend_label(cfg.memory.backend, cfg.memory.backend, zh)});
     } else {
         try stdout.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "set" else "not set (use --api-key or edit config)"});
         try stdout.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
@@ -648,6 +668,32 @@ fn promptChoice(out: *std.Io.Writer, buf: []u8, max: usize, default_idx: usize) 
 const tunnel_options = [_][]const u8{ "none", "cloudflare", "ngrok", "tailscale" };
 const autonomy_options = [_][]const u8{ "supervised", "autonomous", "fully_autonomous" };
 
+fn memory_backend_label(key: []const u8, fallback_label: []const u8, zh: bool) []const u8 {
+    if (!zh) return fallback_label;
+    if (std.mem.eql(u8, key, "sqlite")) return "SQLite + FTS5 搜索（推荐）";
+    if (std.mem.eql(u8, key, "markdown")) return "Markdown 文件（简单、可读）";
+    if (std.mem.eql(u8, key, "lucid")) return "Lucid（SQLite + 跨项目记忆同步，需 lucid CLI）";
+    if (std.mem.eql(u8, key, "none")) return "关闭持久化记忆";
+    return fallback_label;
+}
+
+fn tunnel_label(key: []const u8, zh: bool) []const u8 {
+    if (!zh) return key;
+    if (std.mem.eql(u8, key, "none")) return "不使用隧道";
+    if (std.mem.eql(u8, key, "cloudflare")) return "Cloudflare Tunnel";
+    if (std.mem.eql(u8, key, "ngrok")) return "ngrok";
+    if (std.mem.eql(u8, key, "tailscale")) return "Tailscale";
+    return key;
+}
+
+fn autonomy_label(key: []const u8, zh: bool) []const u8 {
+    if (!zh) return key;
+    if (std.mem.eql(u8, key, "supervised")) return "受监督（推荐）";
+    if (std.mem.eql(u8, key, "autonomous")) return "自治（只读）";
+    if (std.mem.eql(u8, key, "fully_autonomous")) return "全自动（高风险）";
+    return key;
+}
+
 /// Interactive wizard entry point — runs the full setup interactively.
 pub fn runWizard(allocator: std.mem.Allocator) !void {
     const zh = is_zh_ui();
@@ -684,7 +730,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     // ── Step 1: Provider selection ──
     try out.writeAll(if (zh) "  第 1/9 步：选择提供商\n" else "  Step 1/9: Select a provider\n");
     for (known_providers, 0..) |p, i| {
-        try out.print("    [{d}] {s}\n", .{ i + 1, p.label });
+        try out.print("    [{d}] {s}\n", .{ i + 1, provider_label(p, zh) });
     }
     try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const provider_idx = promptChoice(out, &input_buf, known_providers.len, 0) orelse {
@@ -694,11 +740,11 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     };
     const selected_provider = known_providers[provider_idx];
     cfg.default_provider = selected_provider.key;
-    try out.print("  -> {s}\n\n", .{selected_provider.label});
+    try out.print("  -> {s}\n\n", .{provider_label(selected_provider, zh)});
 
     // ── Step 2: Base URL override (optional) ──
     if (zh) {
-        try out.print("  第 2/9 步：Base URL（回车使用默认 {s}）: ", .{selected_provider.default_base_url});
+        try out.print("  第 2/9 步：基础 URL（回车使用默认值 {s}）: ", .{selected_provider.default_base_url});
     } else {
         try out.print("  Step 2/9: Base URL (press Enter to use default {s}): ", .{selected_provider.default_base_url});
     }
@@ -720,7 +766,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     // ── Step 3: API key ──
     const env_hint = selected_provider.env_var;
     if (zh) {
-        try out.print("  第 3/9 步：输入 API Key（直接回车则使用环境变量 {s}）: ", .{env_hint});
+        try out.print("  第 3/9 步：输入 API 密钥（直接回车则使用环境变量 {s}）: ", .{env_hint});
     } else {
         try out.print("  Step 3/9: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
     }
@@ -739,7 +785,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         cfg.providers = entries;
     }
     if (api_key_input.len > 0) {
-        try out.writeAll(if (zh) "  -> API Key 已设置\n\n" else "  -> API key set\n\n");
+        try out.writeAll(if (zh) "  -> API 密钥已设置\n\n" else "  -> API key set\n\n");
     } else {
         if (zh) {
             try out.print("  -> 将从环境变量 ${s} 读取\n\n", .{env_hint});
@@ -814,7 +860,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     const backends = selectableBackends();
     try out.writeAll(if (zh) "  第 5/9 步：记忆后端\n" else "  Step 5/9: Memory backend\n");
     for (backends, 0..) |b, i| {
-        try out.print("    [{d}] {s}\n", .{ i + 1, b.label });
+        try out.print("    [{d}] {s}\n", .{ i + 1, memory_backend_label(b.key, b.label, zh) });
     }
     try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const mem_idx = promptChoice(out, &input_buf, backends.len, 0) orelse {
@@ -824,11 +870,15 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     };
     cfg.memory.backend = backends[mem_idx].key;
     cfg.memory.auto_save = backends[mem_idx].auto_save_default;
-    try out.print("  -> {s}\n\n", .{backends[mem_idx].label});
+    try out.print("  -> {s}\n\n", .{memory_backend_label(backends[mem_idx].key, backends[mem_idx].label, zh)});
 
     // ── Step 6: Tunnel ──
     try out.writeAll(if (zh) "  第 6/9 步：隧道\n" else "  Step 6/9: Tunnel\n");
-    try out.writeAll("    [1] none\n    [2] cloudflare\n    [3] ngrok\n    [4] tailscale\n");
+    if (zh) {
+        try out.writeAll("    [1] 不使用隧道\n    [2] Cloudflare Tunnel\n    [3] ngrok\n    [4] Tailscale\n");
+    } else {
+        try out.writeAll("    [1] none\n    [2] cloudflare\n    [3] ngrok\n    [4] tailscale\n");
+    }
     try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const tunnel_idx = promptChoice(out, &input_buf, tunnel_options.len, 0) orelse {
         try out.writeAll(aborted_msg);
@@ -836,11 +886,15 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         return;
     };
     cfg.tunnel.provider = tunnel_options[tunnel_idx];
-    try out.print("  -> {s}\n\n", .{tunnel_options[tunnel_idx]});
+    try out.print("  -> {s}\n\n", .{tunnel_label(tunnel_options[tunnel_idx], zh)});
 
     // ── Step 7: Autonomy level ──
     try out.writeAll(if (zh) "  第 7/9 步：自治级别\n" else "  Step 7/9: Autonomy level\n");
-    try out.writeAll("    [1] supervised\n    [2] autonomous\n    [3] fully_autonomous\n");
+    if (zh) {
+        try out.writeAll("    [1] 受监督（推荐）\n    [2] 自治（只读）\n    [3] 全自动（高风险）\n");
+    } else {
+        try out.writeAll("    [1] supervised\n    [2] autonomous\n    [3] fully_autonomous\n");
+    }
     try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const autonomy_idx = promptChoice(out, &input_buf, autonomy_options.len, 0) orelse {
         try out.writeAll(aborted_msg);
@@ -853,7 +907,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         2 => .full,
         else => .supervised,
     };
-    try out.print("  -> {s}\n\n", .{autonomy_options[autonomy_idx]});
+    try out.print("  -> {s}\n\n", .{autonomy_label(autonomy_options[autonomy_idx], zh)});
 
     // ── Step 8: Channels ──
     try out.writeAll(if (zh) "  第 8/9 步：现在配置频道吗？[y/N]: " else "  Step 8/9: Configure channels now? [y/N]: ");
@@ -909,7 +963,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     // Print summary
     try out.writeAll(if (zh) "  -- 配置完成 --\n\n" else "  -- Configuration complete --\n\n");
     if (zh) {
-        try out.print("  [OK] 提供商:     {s}\n", .{cfg.default_provider});
+        try out.print("  [OK] 提供商:     {s} ({s})\n", .{ cfg.default_provider, provider_label(selected_provider, zh) });
     } else {
         try out.print("  [OK] Provider:   {s}\n", .{cfg.default_provider});
     }
@@ -922,14 +976,19 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     }
     const effective_base_url = cfg.getProviderBaseUrl(cfg.default_provider) orelse selected_provider.default_base_url;
     if (zh) {
-        try out.print("  [OK] Base URL:   {s}\n", .{effective_base_url});
+        try out.print("  [OK] 基础 URL:   {s}\n", .{effective_base_url});
     } else {
         try out.print("  [OK] Base URL:   {s}\n", .{effective_base_url});
     }
     if (zh) {
-        try out.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "使用环境变量"});
-        try out.print("  [OK] 记忆后端:   {s}\n", .{cfg.memory.backend});
-        try out.print("  [OK] 隧道:       {s}\n", .{cfg.tunnel.provider});
+        try out.print("  [OK] API 密钥:   {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "使用环境变量"});
+        try out.print("  [OK] 记忆后端:   {s}\n", .{memory_backend_label(cfg.memory.backend, cfg.memory.backend, zh)});
+        try out.print("  [OK] 隧道:       {s}\n", .{tunnel_label(cfg.tunnel.provider, zh)});
+        try out.print("  [OK] 自治级别:   {s}\n", .{switch (cfg.autonomy.level) {
+            .supervised => autonomy_label("supervised", zh),
+            .read_only => autonomy_label("autonomous", zh),
+            .full => autonomy_label("fully_autonomous", zh),
+        }});
         try out.print("  [OK] 工作目录:   {s}\n", .{cfg.workspace_dir});
         try out.print("  [OK] 配置文件:   {s}\n", .{cfg.config_path});
     } else {
