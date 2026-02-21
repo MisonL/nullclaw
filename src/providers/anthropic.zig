@@ -610,10 +610,10 @@ test "auth header for regular key" {
 }
 
 test "auth header for setup token" {
-    const auth = try AnthropicProvider.authHeaderValue(std.testing.allocator, "sk-ant-oat01-mytoken");
+    const auth = try AnthropicProvider.authHeaderValue(std.testing.allocator, "sk-ant-oat01-example");
     defer if (auth.needs_free) std.testing.allocator.free(auth.header_value);
     try std.testing.expectEqualStrings("authorization", auth.header_name);
-    try std.testing.expectEqualStrings("Bearer sk-ant-oat01-mytoken", auth.header_value);
+    try std.testing.expectEqualStrings("Bearer sk-ant-oat01-example", auth.header_value);
     try std.testing.expect(auth.needs_free);
 }
 

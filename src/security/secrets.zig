@@ -292,7 +292,7 @@ test "secret store encrypt decrypt roundtrip" {
     defer std.testing.allocator.free(tmp_path);
 
     const store = SecretStore.init(tmp_path, true);
-    const secret = "sk-my-secret-api-key-12345";
+    const secret = "example-secret-value-12345";
 
     const encrypted = try store.encryptSecret(std.testing.allocator, secret);
     defer std.testing.allocator.free(encrypted);

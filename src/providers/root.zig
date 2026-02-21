@@ -1255,9 +1255,9 @@ test "compatibleProviderUrl returns correct URLs" {
 
 test "scrubSecretPatterns redacts sk- tokens" {
     const allocator = std.testing.allocator;
-    const result = try scrubSecretPatterns(allocator, "request failed: sk-1234567890abcdef");
+    const result = try scrubSecretPatterns(allocator, "request failed: sk-example-test-key");
     defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "sk-1234567890abcdef") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-example-test-key") == null);
     try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
 }
 
@@ -1480,7 +1480,7 @@ test "astrai env candidate is ASTRAI_API_KEY" {
 
 test "scrubSecretPatterns redacts ghp_ GitHub tokens" {
     const allocator = std.testing.allocator;
-    const result = try scrubSecretPatterns(allocator, "token is ghp_ABCDef123456789012345678901234567890");
+    const result = try scrubSecretPatterns(allocator, "token is ghp_example_test_value");
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "ghp_") == null);
     try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
@@ -1504,9 +1504,9 @@ test "scrubSecretPatterns redacts glpat- GitLab tokens" {
 
 test "scrubSecretPatterns redacts AKIA AWS keys" {
     const allocator = std.testing.allocator;
-    const result = try scrubSecretPatterns(allocator, "aws AKIAIOSFODNN7EXAMPLE");
+    const result = try scrubSecretPatterns(allocator, "aws AKIA_TEST_EXAMPLE");
     defer allocator.free(result);
-    try std.testing.expect(std.mem.indexOf(u8, result, "AKIAIOSFODNN7EXAMPLE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "AKIA_TEST_EXAMPLE") == null);
     try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
 }
 
@@ -1541,11 +1541,11 @@ test "scrubSecretPatterns redacts password=VALUE pattern" {
 
 test "scrubSecretPatterns redacts Bearer TOKEN pattern" {
     const allocator = std.testing.allocator;
-    const result = try scrubSecretPatterns(allocator, "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret");
+    const result = try scrubSecretPatterns(allocator, "Authorization: Bearer example-token-value");
     defer allocator.free(result);
     try std.testing.expect(std.mem.indexOf(u8, result, "Bearer ") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "example-token-value") == null);
 }
 
 test "scrubSecretPatterns redacts secret= with quoted value" {
@@ -1592,14 +1592,14 @@ test "scrubToolOutput passes through clean short output" {
 
 test "scrubSecretPatterns handles multiple patterns in one string" {
     const allocator = std.testing.allocator;
-    const input = "keys: api_key=abc123 token=xyz789 ghp_TokenHere sk-mykey123";
+    const input = "keys: api_key=abc123 token=xyz789 ghp_example sk-example-key";
     const result = try scrubSecretPatterns(allocator, input);
     defer allocator.free(result);
     // All secrets should be redacted
     try std.testing.expect(std.mem.indexOf(u8, result, "abc123") == null);
     try std.testing.expect(std.mem.indexOf(u8, result, "xyz789") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "ghp_TokenHere") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "sk-mykey123") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "ghp_example") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-example-key") == null);
 }
 
 test "eqlLowercase matches case-insensitively" {
@@ -1644,7 +1644,7 @@ test "detectProviderByApiKey perplexity" {
 }
 
 test "detectProviderByApiKey aws" {
-    try std.testing.expect(detectProviderByApiKey("AKIAIOSFODNN7EXAMPLE") == .compatible_provider);
+    try std.testing.expect(detectProviderByApiKey("AKIA_TEST_EXAMPLE") == .compatible_provider);
 }
 
 test "detectProviderByApiKey gemini" {
