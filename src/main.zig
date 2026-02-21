@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const yc = @import("nullclaw");
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
@@ -83,7 +84,15 @@ fn parseCommand(arg: []const u8) ?Command {
     return command_map.get(arg);
 }
 
+fn force_windows_console_utf8() void {
+    if (builtin.os.tag != .windows) return;
+    const windows = std.os.windows;
+    _ = windows.kernel32.SetConsoleOutputCP(65001);
+}
+
 pub fn main() !void {
+    force_windows_console_utf8();
+
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
