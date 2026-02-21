@@ -5,8 +5,13 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const locale = @import("locale.zig");
 
 const SERVICE_LABEL = "com.nullclaw.daemon";
+
+fn is_zh_ui() bool {
+    return locale.detect_ui_language() == .zh_cn;
+}
 
 pub const ServiceCommand = enum {
     install,
@@ -76,6 +81,7 @@ fn stopService(allocator: std.mem.Allocator) !void {
 }
 
 fn serviceStatus(allocator: std.mem.Allocator) !void {
+    const zh = is_zh_ui();
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const w = &bw.interface;
@@ -84,18 +90,34 @@ fn serviceStatus(allocator: std.mem.Allocator) !void {
         const output = runCapture(allocator, &.{ "launchctl", "list" }) catch "";
         defer if (output.len > 0) allocator.free(output);
         const running = std.mem.indexOf(u8, output, SERVICE_LABEL) != null;
-        try w.print("Service: {s}\n", .{if (running) "running/loaded" else "not loaded"});
+        if (zh) {
+            try w.print("服务: {s}\n", .{if (running) "运行中/已加载" else "未加载"});
+        } else {
+            try w.print("Service: {s}\n", .{if (running) "running/loaded" else "not loaded"});
+        }
         const plist = try macosServiceFile(allocator);
         defer allocator.free(plist);
-        try w.print("Unit: {s}\n", .{plist});
+        if (zh) {
+            try w.print("单元文件: {s}\n", .{plist});
+        } else {
+            try w.print("Unit: {s}\n", .{plist});
+        }
         try w.flush();
     } else if (comptime builtin.os.tag == .linux) {
         const output = runCapture(allocator, &.{ "systemctl", "--user", "is-active", "nullclaw.service" }) catch try allocator.dupe(u8, "unknown");
         defer allocator.free(output);
-        try w.print("Service state: {s}\n", .{std.mem.trim(u8, output, " \t\n\r")});
+        if (zh) {
+            try w.print("服务状态: {s}\n", .{std.mem.trim(u8, output, " \t\n\r")});
+        } else {
+            try w.print("Service state: {s}\n", .{std.mem.trim(u8, output, " \t\n\r")});
+        }
         const unit = try linuxServiceFile(allocator);
         defer allocator.free(unit);
-        try w.print("Unit: {s}\n", .{unit});
+        if (zh) {
+            try w.print("单元文件: {s}\n", .{unit});
+        } else {
+            try w.print("Unit: {s}\n", .{unit});
+        }
         try w.flush();
     } else {
         return error.UnsupportedPlatform;
@@ -124,8 +146,8 @@ fn installMacos(allocator: std.mem.Allocator, _: []const u8) !void {
     defer allocator.free(plist);
 
     // Ensure parent directory exists
-    if (std.mem.lastIndexOfScalar(u8, plist, '/')) |idx| {
-        std.fs.makeDirAbsolute(plist[0..idx]) catch |err| switch (err) {
+    if (std.fs.path.dirname(plist)) |parent| {
+        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -137,16 +159,16 @@ fn installMacos(allocator: std.mem.Allocator, _: []const u8) !void {
 
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
-    const logs_dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw/logs", .{home});
+    const logs_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw", "logs" });
     defer allocator.free(logs_dir);
     std.fs.makeDirAbsolute(logs_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
 
-    const stdout_log = try std.fmt.allocPrint(allocator, "{s}/daemon.stdout.log", .{logs_dir});
+    const stdout_log = try std.fs.path.join(allocator, &.{ logs_dir, "daemon.stdout.log" });
     defer allocator.free(stdout_log);
-    const stderr_log = try std.fmt.allocPrint(allocator, "{s}/daemon.stderr.log", .{logs_dir});
+    const stderr_log = try std.fs.path.join(allocator, &.{ logs_dir, "daemon.stderr.log" });
     defer allocator.free(stderr_log);
 
     const content = try std.fmt.allocPrint(allocator,
@@ -183,8 +205,8 @@ fn installLinux(allocator: std.mem.Allocator) !void {
     const unit = try linuxServiceFile(allocator);
     defer allocator.free(unit);
 
-    if (std.mem.lastIndexOfScalar(u8, unit, '/')) |idx| {
-        std.fs.makeDirAbsolute(unit[0..idx]) catch |err| switch (err) {
+    if (std.fs.path.dirname(unit)) |parent| {
+        std.fs.makeDirAbsolute(parent) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
@@ -220,19 +242,47 @@ fn installLinux(allocator: std.mem.Allocator) !void {
 // ── Path helpers ─────────────────────────────────────────────────
 
 fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
-    return std.process.getEnvVarOwned(allocator, "HOME") catch return error.NoHomeDir;
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(drive);
+
+    const path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    return std.fs.path.join(allocator, &.{ drive, path });
 }
 
 fn macosServiceFile(allocator: std.mem.Allocator) ![]u8 {
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/Library/LaunchAgents/{s}.plist", .{ home, SERVICE_LABEL });
+    const dir = try std.fs.path.join(allocator, &.{ home, "Library", "LaunchAgents" });
+    defer allocator.free(dir);
+    return std.fs.path.join(allocator, &.{ dir, SERVICE_LABEL ++ ".plist" });
 }
 
 fn linuxServiceFile(allocator: std.mem.Allocator) ![]u8 {
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.config/systemd/user/nullclaw.service", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".config", "systemd", "user", "nullclaw.service" });
 }
 
 // ── Process helpers ──────────────────────────────────────────────

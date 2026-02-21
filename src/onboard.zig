@@ -9,21 +9,22 @@
 //!   - Provider/model selection with curated defaults
 
 const std = @import("std");
+const builtin = @import("builtin");
 const config_mod = @import("config.zig");
 const Config = config_mod.Config;
 const memory_root = @import("memory/root.zig");
 const http_util = @import("http_util.zig");
+const locale = @import("locale.zig");
 
 // ── Constants ────────────────────────────────────────────────────
 
 const BANNER =
     \\
-    \\  ██╗   ██╗ ██████╗  ██████╗████████╗ ██████╗  ██████╗██╗      █████╗ ██╗    ██╗
-    \\  ╚██╗ ██╔╝██╔═══██╗██╔════╝╚══██╔══╝██╔═══██╗██╔════╝██║     ██╔══██╗██║    ██║
-    \\   ╚████╔╝ ██║   ██║██║        ██║   ██║   ██║██║     ██║     ███████║██║ █╗ ██║
-    \\    ╚██╔╝  ██║   ██║██║        ██║   ██║   ██║██║     ██║     ██╔══██║██║███╗██║
-    \\     ██║   ╚██████╔╝╚██████╗   ██║   ╚██████╔╝╚██████╗███████╗██║  ██║╚███╔███╔╝
-    \\     ╚═╝    ╚═════╝  ╚═════╝   ╚═╝    ╚═════╝  ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
+    \\  _   _ _   _ _ _      _                
+    \\ | \\ | | | | | | | ___| | __ ___      __
+    \\ |  \\| | | | | | |/ __| |/ _` \\ \\ /\\ / /
+    \\ | |\\  | |_| | | | (__| | (_| |\\ V  V / 
+    \\ |_| \\_|\\__,_|_|_|\\___|_|\\__,_| \\_/\\_/  
     \\
     \\  The smallest AI assistant. Zig-powered.
     \\
@@ -169,11 +170,11 @@ fn dupeFallbackModels(allocator: std.mem.Allocator, provider: []const u8) ![][]c
 /// Returns at most 20 model IDs. Caller ALWAYS owns the returned slice and strings.
 /// Free with: for (models) |m| allocator.free(m); allocator.free(models);
 pub fn fetchModels(allocator: std.mem.Allocator, provider: []const u8, api_key: ?[]const u8) ![][]const u8 {
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch
+    const home = resolveHomeDir(allocator) catch
         return dupeFallbackModels(allocator, provider);
     defer allocator.free(home);
 
-    const state_dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw/state", .{home});
+    const state_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw", "state" });
     defer allocator.free(state_dir);
 
     // Ensure state directory exists
@@ -290,7 +291,7 @@ pub fn loadModelsWithCache(allocator: std.mem.Allocator, cache_dir: []const u8, 
 
 fn loadModelsWithCacheInner(allocator: std.mem.Allocator, cache_dir: []const u8, provider: []const u8, api_key: ?[]const u8) ![][]const u8 {
     const canonical = canonicalProviderName(provider);
-    const cache_path = try std.fmt.allocPrint(allocator, "{s}/models_cache.json", .{cache_dir});
+    const cache_path = try std.fs.path.join(allocator, &.{ cache_dir, "models_cache.json" });
     defer allocator.free(cache_path);
 
     // Try reading cache file
@@ -407,36 +408,90 @@ pub fn parseModelIds(allocator: std.mem.Allocator, json_response: []const u8) ![
     return result.toOwnedSlice(allocator);
 }
 
+fn is_zh_ui() bool {
+    return locale.detect_ui_language() == .zh_cn;
+}
+
+fn print_next_steps(out: *std.Io.Writer, has_api_key: bool, env_var: []const u8, zh: bool) !void {
+    if (zh) {
+        try out.writeAll("\n  下一步:\n");
+    } else {
+        try out.writeAll("\n  Next steps:\n");
+    }
+
+    if (!has_api_key) {
+        if (builtin.os.tag == .windows) {
+            if (zh) {
+                try out.print("    1. 设置 API Key (PowerShell):  $env:{s}=\"sk-...\"\n", .{env_var});
+                try out.print("       或 Git Bash:                export {s}=\"sk-...\"\n", .{env_var});
+                try out.writeAll("    2. 对话:                       nullclaw agent -m \"你好！\"\n");
+                try out.writeAll("    3. 启动网关:                   nullclaw gateway\n");
+            } else {
+                try out.print("    1. Set API key (PowerShell):  $env:{s}=\"sk-...\"\n", .{env_var});
+                try out.print("       Or Git Bash:                export {s}=\"sk-...\"\n", .{env_var});
+                try out.writeAll("    2. Chat:                       nullclaw agent -m \"Hello!\"\n");
+                try out.writeAll("    3. Gateway:                    nullclaw gateway\n");
+            }
+        } else {
+            if (zh) {
+                try out.print("    1. 设置 API Key:  export {s}=\"sk-...\"\n", .{env_var});
+                try out.writeAll("    2. 对话:           nullclaw agent -m \"你好！\"\n");
+                try out.writeAll("    3. 启动网关:       nullclaw gateway\n");
+            } else {
+                try out.print("    1. Set your API key:  export {s}=\"sk-...\"\n", .{env_var});
+                try out.writeAll("    2. Chat:              nullclaw agent -m \"Hello!\"\n");
+                try out.writeAll("    3. Gateway:           nullclaw gateway\n");
+            }
+        }
+        return;
+    }
+
+    if (zh) {
+        try out.writeAll("    1. 对话:      nullclaw agent -m \"你好！\"\n");
+        try out.writeAll("    2. 启动网关:  nullclaw gateway\n");
+        try out.writeAll("    3. 查看状态:  nullclaw status\n");
+    } else {
+        try out.writeAll("    1. Chat:     nullclaw agent -m \"Hello!\"\n");
+        try out.writeAll("    2. Gateway:  nullclaw gateway\n");
+        try out.writeAll("    3. Status:   nullclaw status\n");
+    }
+}
+
 // ── Quick setup ──────────────────────────────────────────────────
 
 /// Non-interactive setup: generates a sensible default config.
 pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provider: ?[]const u8, memory_backend: ?[]const u8) !void {
+    const zh = is_zh_ui();
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
     try stdout.writeAll(BANNER);
-    try stdout.writeAll("  Quick Setup -- generating config with sensible defaults...\n\n");
+    if (zh) {
+        try stdout.writeAll("  快速初始化 -- 正在使用推荐默认值生成配置...\n\n");
+    } else {
+        try stdout.writeAll("  Quick Setup -- generating config with sensible defaults...\n\n");
+    }
 
     // Load or create config
-    var cfg = Config.load(allocator) catch Config{
-        .workspace_dir = try getDefaultWorkspace(allocator),
-        .config_path = try getDefaultConfigPath(allocator),
-        .allocator = allocator,
+    var cfg = Config.load(allocator) catch blk: {
+        var default_cfg = Config{
+            .workspace_dir = "",
+            .config_path = "",
+            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+        default_cfg.workspace_dir = try getDefaultWorkspace(default_cfg.ownedAllocator());
+        default_cfg.config_path = try getDefaultConfigPath(default_cfg.ownedAllocator());
+        break :blk default_cfg;
     };
+    defer cfg.deinit();
 
     // Apply overrides
     if (provider) |p| cfg.default_provider = p;
     if (api_key) |key| {
-        // Free old providers if previously loaded from config
-        for (cfg.providers) |e| {
-            allocator.free(e.name);
-            if (e.api_key) |k| allocator.free(k);
-            if (e.base_url) |b| allocator.free(b);
-        }
-        if (cfg.providers.len > 0) allocator.free(cfg.providers);
         // Store in providers section for the default provider
-        const entries = try allocator.alloc(config_mod.ProviderEntry, 1);
-        entries[0] = .{ .name = try allocator.dupe(u8, cfg.default_provider), .api_key = key };
+        const entries = try cfg.ownedAllocator().alloc(config_mod.ProviderEntry, 1);
+        entries[0] = .{ .name = try cfg.ownedAllocator().dupe(u8, cfg.default_provider), .api_key = try cfg.ownedAllocator().dupe(u8, key) };
         cfg.providers = entries;
     }
     if (memory_backend) |mb| cfg.memory.backend = mb;
@@ -465,24 +520,30 @@ pub fn runQuickSetup(allocator: std.mem.Allocator, api_key: ?[]const u8, provide
     try cfg.save();
 
     // Print summary
-    try stdout.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
-    try stdout.print("  [OK] Provider:   {s}\n", .{cfg.default_provider});
-    if (cfg.default_model) |m| {
-        try stdout.print("  [OK] Model:      {s}\n", .{m});
-    }
-    try stdout.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "set" else "not set (use --api-key or edit config)"});
-    try stdout.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
-    try stdout.writeAll("\n  Next steps:\n");
-    if (cfg.defaultProviderKey() == null) {
-        try stdout.writeAll("    1. Set your API key:  export OPENROUTER_API_KEY=\"sk-...\"\n");
-        try stdout.writeAll("    2. Chat:              nullclaw agent -m \"Hello!\"\n");
-        try stdout.writeAll("    3. Gateway:           nullclaw gateway\n");
+    if (zh) {
+        try stdout.print("  [OK] 工作目录:   {s}\n", .{cfg.workspace_dir});
+        try stdout.print("  [OK] 提供商:     {s}\n", .{cfg.default_provider});
     } else {
-        try stdout.writeAll("    1. Chat:     nullclaw agent -m \"Hello!\"\n");
-        try stdout.writeAll("    2. Gateway:  nullclaw gateway\n");
-        try stdout.writeAll("    3. Status:   nullclaw status\n");
+        try stdout.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
+        try stdout.print("  [OK] Provider:   {s}\n", .{cfg.default_provider});
     }
+    if (cfg.default_model) |m| {
+        if (zh) {
+            try stdout.print("  [OK] 模型:       {s}\n", .{m});
+        } else {
+            try stdout.print("  [OK] Model:      {s}\n", .{m});
+        }
+    }
+    if (zh) {
+        try stdout.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "未设置（可用 --api-key 或编辑 config）"});
+        try stdout.print("  [OK] 记忆后端:   {s}\n", .{cfg.memory.backend});
+    } else {
+        try stdout.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "set" else "not set (use --api-key or edit config)"});
+        try stdout.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
+    }
+    try print_next_steps(stdout, cfg.defaultProviderKey() != null, providerEnvVar(cfg.default_provider), zh);
     try stdout.writeAll("\n");
+    try stdout.flush();
 }
 
 /// Main entry point — called from main.zig as `onboard.run(allocator)`.
@@ -492,29 +553,36 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 /// Reconfigure channels and allowlists only (preserves existing config).
 pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
+    const zh = is_zh_ui();
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
-    try stdout.writeAll("Channel configuration status:\n\n");
+    try stdout.writeAll(if (zh) "频道配置状态:\n\n" else "Channel configuration status:\n\n");
 
-    const cfg = Config.load(allocator) catch {
-        try stdout.writeAll("No existing config found. Run `nullclaw onboard` first.\n");
+    var cfg = Config.load(allocator) catch {
+        try stdout.writeAll(if (zh) "未发现已有配置，请先运行 `nullclaw onboard`。\n" else "No existing config found. Run `nullclaw onboard` first.\n");
         try stdout.flush();
         return error.ConfigNotFound;
     };
+    defer cfg.deinit();
 
-    try stdout.print("  CLI:       {s}\n", .{if (cfg.channels.cli) "enabled" else "disabled"});
-    try stdout.print("  Telegram:  {s}\n", .{if (cfg.channels.telegram != null) "configured" else "not configured"});
-    try stdout.print("  Discord:   {s}\n", .{if (cfg.channels.discord != null) "configured" else "not configured"});
-    try stdout.print("  Slack:     {s}\n", .{if (cfg.channels.slack != null) "configured" else "not configured"});
-    try stdout.print("  Webhook:   {s}\n", .{if (cfg.channels.webhook != null) "configured" else "not configured"});
-    try stdout.print("  iMessage:  {s}\n", .{if (cfg.channels.imessage != null) "configured" else "not configured"});
-    try stdout.print("  Matrix:    {s}\n", .{if (cfg.channels.matrix != null) "configured" else "not configured"});
-    try stdout.print("  WhatsApp:  {s}\n", .{if (cfg.channels.whatsapp != null) "configured" else "not configured"});
-    try stdout.print("  IRC:       {s}\n", .{if (cfg.channels.irc != null) "configured" else "not configured"});
-    try stdout.print("  Lark:      {s}\n", .{if (cfg.channels.lark != null) "configured" else "not configured"});
-    try stdout.print("  DingTalk:  {s}\n", .{if (cfg.channels.dingtalk != null) "configured" else "not configured"});
-    try stdout.writeAll("\nTo modify channels, edit your config file:\n");
+    const enabled_word = if (zh) "已启用" else "enabled";
+    const disabled_word = if (zh) "已禁用" else "disabled";
+    const configured_word = if (zh) "已配置" else "configured";
+    const not_configured_word = if (zh) "未配置" else "not configured";
+
+    try stdout.print("  CLI:       {s}\n", .{if (cfg.channels.cli) enabled_word else disabled_word});
+    try stdout.print("  Telegram:  {s}\n", .{if (cfg.channels.telegram != null) configured_word else not_configured_word});
+    try stdout.print("  Discord:   {s}\n", .{if (cfg.channels.discord != null) configured_word else not_configured_word});
+    try stdout.print("  Slack:     {s}\n", .{if (cfg.channels.slack != null) configured_word else not_configured_word});
+    try stdout.print("  Webhook:   {s}\n", .{if (cfg.channels.webhook != null) configured_word else not_configured_word});
+    try stdout.print("  iMessage:  {s}\n", .{if (cfg.channels.imessage != null) configured_word else not_configured_word});
+    try stdout.print("  Matrix:    {s}\n", .{if (cfg.channels.matrix != null) configured_word else not_configured_word});
+    try stdout.print("  WhatsApp:  {s}\n", .{if (cfg.channels.whatsapp != null) configured_word else not_configured_word});
+    try stdout.print("  IRC:       {s}\n", .{if (cfg.channels.irc != null) configured_word else not_configured_word});
+    try stdout.print("  Lark:      {s}\n", .{if (cfg.channels.lark != null) configured_word else not_configured_word});
+    try stdout.print("  DingTalk:  {s}\n", .{if (cfg.channels.dingtalk != null) configured_word else not_configured_word});
+    try stdout.writeAll(if (zh) "\n如需修改频道，请编辑配置文件:\n" else "\nTo modify channels, edit your config file:\n");
     try stdout.print("  {s}\n", .{cfg.config_path});
     try stdout.flush();
 }
@@ -523,9 +591,27 @@ pub fn runChannelsOnly(allocator: std.mem.Allocator) !void {
 /// Returns null on EOF (Ctrl+D).
 fn readLine(buf: []u8) ?[]const u8 {
     const stdin = std.fs.File.stdin();
-    const n = stdin.read(buf) catch return null;
-    if (n == 0) return null;
-    return std.mem.trimRight(u8, buf[0..n], "\r\n");
+    var idx: usize = 0;
+    var saw_any = false;
+
+    while (true) {
+        var one: [1]u8 = undefined;
+        const n = stdin.read(&one) catch return null;
+        if (n == 0) break;
+        saw_any = true;
+
+        const ch = one[0];
+        if (ch == '\n') break;
+        if (ch == '\r') continue;
+
+        if (idx < buf.len) {
+            buf[idx] = ch;
+            idx += 1;
+        }
+    }
+
+    if (!saw_any) return null;
+    return buf[0..idx];
 }
 
 /// Prompt user with a message, read a line. Returns default_val if input is empty.
@@ -554,31 +640,45 @@ const autonomy_options = [_][]const u8{ "supervised", "autonomous", "fully_auton
 
 /// Interactive wizard entry point — runs the full setup interactively.
 pub fn runWizard(allocator: std.mem.Allocator) !void {
+    const zh = is_zh_ui();
+    const aborted_msg = if (zh) "\n  已取消。\n" else "\n  Aborted.\n";
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const out = &bw.interface;
     try out.writeAll(BANNER);
-    try out.writeAll("  Welcome to nullclaw -- the fastest, smallest AI assistant.\n");
-    try out.writeAll("  This wizard will configure your agent.\n\n");
+    if (zh) {
+        try out.writeAll("  欢迎使用 nullclaw -- 轻量快速的 AI 助手。\n");
+        try out.writeAll("  本向导将帮助你完成基础配置。\n\n");
+    } else {
+        try out.writeAll("  Welcome to nullclaw -- the fastest, smallest AI assistant.\n");
+        try out.writeAll("  This wizard will configure your agent.\n\n");
+    }
     try out.flush();
 
     var input_buf: [512]u8 = undefined;
 
     // Load existing or create fresh config
-    var cfg = Config.load(allocator) catch Config{
-        .workspace_dir = try getDefaultWorkspace(allocator),
-        .config_path = try getDefaultConfigPath(allocator),
-        .allocator = allocator,
+    var cfg = Config.load(allocator) catch blk: {
+        var default_cfg = Config{
+            .workspace_dir = "",
+            .config_path = "",
+            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+        };
+        default_cfg.workspace_dir = try getDefaultWorkspace(default_cfg.ownedAllocator());
+        default_cfg.config_path = try getDefaultConfigPath(default_cfg.ownedAllocator());
+        break :blk default_cfg;
     };
+    defer cfg.deinit();
 
     // ── Step 1: Provider selection ──
-    try out.writeAll("  Step 1/8: Select a provider\n");
+    try out.writeAll(if (zh) "  第 1/8 步：选择提供商\n" else "  Step 1/8: Select a provider\n");
     for (known_providers, 0..) |p, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, p.label });
     }
-    try out.writeAll("  Choice [1]: ");
+    try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const provider_idx = promptChoice(out, &input_buf, known_providers.len, 0) orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
@@ -588,31 +688,32 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
 
     // ── Step 2: API key ──
     const env_hint = selected_provider.env_var;
-    try out.print("  Step 2/8: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
+    if (zh) {
+        try out.print("  第 2/8 步：输入 API Key（直接回车则使用环境变量 {s}）: ", .{env_hint});
+    } else {
+        try out.print("  Step 2/8: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
+    }
     const api_key_input = prompt(out, &input_buf, "", "") orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
     if (api_key_input.len > 0) {
-        // Free old providers if previously loaded from config
-        for (cfg.providers) |e| {
-            allocator.free(e.name);
-            if (e.api_key) |k| allocator.free(k);
-            if (e.base_url) |b| allocator.free(b);
-        }
-        if (cfg.providers.len > 0) allocator.free(cfg.providers);
-        const entries = try allocator.alloc(config_mod.ProviderEntry, 1);
-        entries[0] = .{ .name = try allocator.dupe(u8, cfg.default_provider), .api_key = try allocator.dupe(u8, api_key_input) };
+        const entries = try cfg.ownedAllocator().alloc(config_mod.ProviderEntry, 1);
+        entries[0] = .{ .name = try cfg.ownedAllocator().dupe(u8, cfg.default_provider), .api_key = try cfg.ownedAllocator().dupe(u8, api_key_input) };
         cfg.providers = entries;
-        try out.writeAll("  -> API key set\n\n");
+        try out.writeAll(if (zh) "  -> API Key 已设置\n\n" else "  -> API key set\n\n");
     } else {
-        try out.print("  -> Will use ${s} from environment\n\n", .{env_hint});
+        if (zh) {
+            try out.print("  -> 将从环境变量 ${s} 读取\n\n", .{env_hint});
+        } else {
+            try out.print("  -> Will use ${s} from environment\n\n", .{env_hint});
+        }
     }
 
     // ── Step 3: Model (with live fetching) ──
-    try out.writeAll("  Step 3/8: Select a model\n");
-    try out.writeAll("  Fetching available models...\n");
+    try out.writeAll(if (zh) "  第 3/8 步：选择模型\n" else "  Step 3/8: Select a model\n");
+    try out.writeAll(if (zh) "  正在拉取可用模型...\n" else "  Fetching available models...\n");
     try out.flush();
 
     const live_models = fetchModels(allocator, selected_provider.key, cfg.defaultProviderKey()) catch
@@ -627,44 +728,60 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     for (live_models[0..display_max], 0..) |m, i| {
         const is_default = std.mem.eql(u8, m, selected_provider.default_model);
         if (is_default) {
-            try out.print("    [{d}] {s} (default)\n", .{ i + 1, m });
+            if (zh) {
+                try out.print("    [{d}] {s} (默认)\n", .{ i + 1, m });
+            } else {
+                try out.print("    [{d}] {s} (default)\n", .{ i + 1, m });
+            }
         } else {
             try out.print("    [{d}] {s}\n", .{ i + 1, m });
         }
     }
     if (live_models.len > display_max) {
-        try out.print("    ... and {d} more (type name to use any model)\n", .{live_models.len - display_max});
+        if (zh) {
+            try out.print("    ... 还有 {d} 个（可直接输入模型名）\n", .{live_models.len - display_max});
+        } else {
+            try out.print("    ... and {d} more (type name to use any model)\n", .{live_models.len - display_max});
+        }
     }
-    try out.print("  Choice [1] or model name [{s}]: ", .{selected_provider.default_model});
+    if (zh) {
+        try out.print("  选择 [1] 或输入模型名 [{s}]: ", .{selected_provider.default_model});
+    } else {
+        try out.print("  Choice [1] or model name [{s}]: ", .{selected_provider.default_model});
+    }
     const model_input = prompt(out, &input_buf, "", "") orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
     if (model_input.len == 0) {
         // Default: use first model from the list (or provider default)
-        cfg.default_model = if (live_models.len > 0) live_models[0] else selected_provider.default_model;
+        if (live_models.len > 0) {
+            cfg.default_model = try cfg.ownedAllocator().dupe(u8, live_models[0]);
+        } else {
+            cfg.default_model = selected_provider.default_model; // Static string, no need to dupe
+        }
     } else if (std.fmt.parseInt(usize, model_input, 10)) |num| {
         if (num >= 1 and num <= display_max) {
-            cfg.default_model = live_models[num - 1];
+            cfg.default_model = try cfg.ownedAllocator().dupe(u8, live_models[num - 1]);
         } else {
-            cfg.default_model = selected_provider.default_model;
+            cfg.default_model = selected_provider.default_model; // Static string
         }
     } else |_| {
         // Free-form model name typed by user
-        cfg.default_model = try allocator.dupe(u8, model_input);
+        cfg.default_model = try cfg.ownedAllocator().dupe(u8, model_input);
     }
     try out.print("  -> {s}\n\n", .{cfg.default_model.?});
 
     // ── Step 4: Memory backend ──
     const backends = selectableBackends();
-    try out.writeAll("  Step 4/8: Memory backend\n");
+    try out.writeAll(if (zh) "  第 4/8 步：记忆后端\n" else "  Step 4/8: Memory backend\n");
     for (backends, 0..) |b, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, b.label });
     }
-    try out.writeAll("  Choice [1]: ");
+    try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const mem_idx = promptChoice(out, &input_buf, backends.len, 0) orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
@@ -673,11 +790,11 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{backends[mem_idx].label});
 
     // ── Step 5: Tunnel ──
-    try out.writeAll("  Step 5/8: Tunnel\n");
+    try out.writeAll(if (zh) "  第 5/8 步：隧道\n" else "  Step 5/8: Tunnel\n");
     try out.writeAll("    [1] none\n    [2] cloudflare\n    [3] ngrok\n    [4] tailscale\n");
-    try out.writeAll("  Choice [1]: ");
+    try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const tunnel_idx = promptChoice(out, &input_buf, tunnel_options.len, 0) orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
@@ -685,11 +802,11 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{tunnel_options[tunnel_idx]});
 
     // ── Step 6: Autonomy level ──
-    try out.writeAll("  Step 6/8: Autonomy level\n");
+    try out.writeAll(if (zh) "  第 6/8 步：自治级别\n" else "  Step 6/8: Autonomy level\n");
     try out.writeAll("    [1] supervised\n    [2] autonomous\n    [3] fully_autonomous\n");
-    try out.writeAll("  Choice [1]: ");
+    try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const autonomy_idx = promptChoice(out, &input_buf, autonomy_options.len, 0) orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
@@ -702,23 +819,28 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try out.print("  -> {s}\n\n", .{autonomy_options[autonomy_idx]});
 
     // ── Step 7: Channels ──
-    try out.writeAll("  Step 7/8: Configure channels now? [y/N]: ");
+    try out.writeAll(if (zh) "  第 7/8 步：现在配置频道吗？[y/N]: " else "  Step 7/8: Configure channels now? [y/N]: ");
     const chan_input = prompt(out, &input_buf, "", "n") orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
-    if (chan_input.len > 0 and (chan_input[0] == 'y' or chan_input[0] == 'Y')) {
-        try out.writeAll("  -> Edit channels in config file after setup.\n\n");
+    const configure_channels = (chan_input.len > 0 and (chan_input[0] == 'y' or chan_input[0] == 'Y')) or std.mem.eql(u8, chan_input, "yes") or std.mem.eql(u8, chan_input, "YES") or std.mem.eql(u8, chan_input, "是");
+    if (configure_channels) {
+        try out.writeAll(if (zh) "  -> 可在配置完成后继续编辑 channels 字段。\n\n" else "  -> Edit channels in config file after setup.\n\n");
     } else {
-        try out.writeAll("  -> Skipped (CLI enabled by default)\n\n");
+        try out.writeAll(if (zh) "  -> 已跳过（CLI 默认启用）\n\n" else "  -> Skipped (CLI enabled by default)\n\n");
     }
 
     // ── Step 8: Workspace path ──
     const default_workspace = try getDefaultWorkspace(allocator);
-    try out.print("  Step 8/8: Workspace path [{s}]: ", .{default_workspace});
+    if (zh) {
+        try out.print("  第 8/8 步：工作目录 [{s}]: ", .{default_workspace});
+    } else {
+        try out.print("  Step 8/8: Workspace path [{s}]: ", .{default_workspace});
+    }
     const ws_input = prompt(out, &input_buf, "", default_workspace) orelse {
-        try out.writeAll("\n  Aborted.\n");
+        try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
@@ -747,26 +869,33 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     try cfg.save();
 
     // Print summary
-    try out.writeAll("  ── Configuration complete ──\n\n");
-    try out.print("  [OK] Provider:   {s}\n", .{cfg.default_provider});
-    if (cfg.default_model) |m| {
-        try out.print("  [OK] Model:      {s}\n", .{m});
-    }
-    try out.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "set" else "from environment"});
-    try out.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
-    try out.print("  [OK] Tunnel:     {s}\n", .{cfg.tunnel.provider});
-    try out.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
-    try out.print("  [OK] Config:     {s}\n", .{cfg.config_path});
-    try out.writeAll("\n  Next steps:\n");
-    if (cfg.defaultProviderKey() == null) {
-        try out.print("    1. Set your API key:  export {s}=\"sk-...\"\n", .{env_hint});
-        try out.writeAll("    2. Chat:              nullclaw agent -m \"Hello!\"\n");
-        try out.writeAll("    3. Gateway:           nullclaw gateway\n");
+    try out.writeAll(if (zh) "  -- 配置完成 --\n\n" else "  -- Configuration complete --\n\n");
+    if (zh) {
+        try out.print("  [OK] 提供商:     {s}\n", .{cfg.default_provider});
     } else {
-        try out.writeAll("    1. Chat:     nullclaw agent -m \"Hello!\"\n");
-        try out.writeAll("    2. Gateway:  nullclaw gateway\n");
-        try out.writeAll("    3. Status:   nullclaw status\n");
+        try out.print("  [OK] Provider:   {s}\n", .{cfg.default_provider});
     }
+    if (cfg.default_model) |m| {
+        if (zh) {
+            try out.print("  [OK] 模型:       {s}\n", .{m});
+        } else {
+            try out.print("  [OK] Model:      {s}\n", .{m});
+        }
+    }
+    if (zh) {
+        try out.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "使用环境变量"});
+        try out.print("  [OK] 记忆后端:   {s}\n", .{cfg.memory.backend});
+        try out.print("  [OK] 隧道:       {s}\n", .{cfg.tunnel.provider});
+        try out.print("  [OK] 工作目录:   {s}\n", .{cfg.workspace_dir});
+        try out.print("  [OK] 配置文件:   {s}\n", .{cfg.config_path});
+    } else {
+        try out.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "set" else "from environment"});
+        try out.print("  [OK] Memory:     {s}\n", .{cfg.memory.backend});
+        try out.print("  [OK] Tunnel:     {s}\n", .{cfg.tunnel.provider});
+        try out.print("  [OK] Workspace:  {s}\n", .{cfg.workspace_dir});
+        try out.print("  [OK] Config:     {s}\n", .{cfg.config_path});
+    }
+    try print_next_steps(out, cfg.defaultProviderKey() != null, env_hint, zh);
     try out.writeAll("\n");
     try out.flush();
 }
@@ -795,15 +924,15 @@ pub fn runModelsRefresh(allocator: std.mem.Allocator) !void {
     try out.flush();
 
     // Build cache path
-    const home = std.process.getEnvVarOwned(allocator, "HOME") catch {
+    const home = resolveHomeDir(allocator) catch {
         try out.writeAll("Could not determine HOME directory.\n");
         try out.flush();
         return;
     };
     defer allocator.free(home);
-    const cache_path = try std.fmt.allocPrint(allocator, "{s}/.nullclaw/models_cache.json", .{home});
+    const cache_path = try std.fs.path.join(allocator, &.{ home, ".nullclaw", "models_cache.json" });
     defer allocator.free(cache_path);
-    const cache_dir = try std.fmt.allocPrint(allocator, "{s}/.nullclaw", .{home});
+    const cache_dir = try std.fs.path.join(allocator, &.{ home, ".nullclaw" });
     defer allocator.free(cache_dir);
 
     // Ensure directory exists
@@ -958,7 +1087,7 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, workspace_dir: []const u8
     try writeIfMissing(allocator, workspace_dir, "BOOTSTRAP.md", bootstrapTemplate());
 
     // Ensure memory/ subdirectory
-    const mem_dir = try std.fmt.allocPrint(allocator, "{s}/memory", .{workspace_dir});
+    const mem_dir = try std.fs.path.join(allocator, &.{ workspace_dir, "memory" });
     defer allocator.free(mem_dir);
     std.fs.makeDirAbsolute(mem_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -967,7 +1096,7 @@ pub fn scaffoldWorkspace(allocator: std.mem.Allocator, workspace_dir: []const u8
 }
 
 fn writeIfMissing(allocator: std.mem.Allocator, dir: []const u8, filename: []const u8, content: []const u8) !void {
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, filename });
+    const path = try std.fs.path.join(allocator, &.{ dir, filename });
     defer allocator.free(path);
 
     // Only write if file doesn't exist
@@ -1135,19 +1264,68 @@ pub fn defaultBackendKey() []const u8 {
 
 // ── Path helpers ─────────────────────────────────────────────────
 
+fn resolveHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(drive);
+
+    const path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    return std.fs.path.join(allocator, &.{ drive, path });
+}
+
 fn getDefaultWorkspace(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try resolveHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.nullclaw/workspace", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "workspace" });
 }
 
 fn getDefaultConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = try std.process.getEnvVarOwned(allocator, "HOME");
+    const home = try resolveHomeDir(allocator);
     defer allocator.free(home);
-    return std.fmt.allocPrint(allocator, "{s}/.nullclaw/config.json", .{home});
+    return std.fs.path.join(allocator, &.{ home, ".nullclaw", "config.json" });
 }
 
 // ── Tests ────────────────────────────────────────────────────────
+
+const OnboardTestTmpDir = struct {
+    tmp_dir: std.testing.TmpDir,
+    path: []u8,
+
+    fn init(allocator: std.mem.Allocator) !OnboardTestTmpDir {
+        var tmp_dir = std.testing.tmpDir(.{});
+        const path = try tmp_dir.dir.realpathAlloc(allocator, ".");
+        return .{
+            .tmp_dir = tmp_dir,
+            .path = path,
+        };
+    }
+
+    fn deinit(self: *OnboardTestTmpDir, allocator: std.mem.Allocator) void {
+        allocator.free(self.path);
+        self.tmp_dir.cleanup();
+    }
+};
 
 test "canonicalProviderName handles aliases" {
     try std.testing.expectEqualStrings("xai", canonicalProviderName("grok"));
@@ -1205,38 +1383,35 @@ test "BANNER contains descriptive text" {
 }
 
 test "scaffoldWorkspace creates files in temp dir" {
-    const dir = "/tmp/nullclaw-test-scaffold";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const dir = test_tmp.path;
+    const memory_path = try std.fs.path.join(allocator, &.{ dir, "MEMORY.md" });
+    defer allocator.free(memory_path);
 
     const ctx = ProjectContext{};
-    try scaffoldWorkspace(std.testing.allocator, dir, &ctx);
+    try scaffoldWorkspace(allocator, dir, &ctx);
 
     // Verify files were created
-    const memory_path = "/tmp/nullclaw-test-scaffold/MEMORY.md";
     const file = try std.fs.openFileAbsolute(memory_path, .{});
     defer file.close();
-    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
-    defer std.testing.allocator.free(content);
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
     try std.testing.expect(content.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, content, "Memory") != null);
 }
 
 test "scaffoldWorkspace is idempotent" {
-    const dir = "/tmp/nullclaw-test-scaffold-idempotent";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const dir = test_tmp.path;
 
     const ctx = ProjectContext{};
-    try scaffoldWorkspace(std.testing.allocator, dir, &ctx);
+    try scaffoldWorkspace(allocator, dir, &ctx);
     // Running again should not fail
-    try scaffoldWorkspace(std.testing.allocator, dir, &ctx);
+    try scaffoldWorkspace(allocator, dir, &ctx);
 }
 
 // ── Additional onboard tests ────────────────────────────────────
@@ -1355,55 +1530,52 @@ test "personaTemplate contains core traits" {
 }
 
 test "scaffoldWorkspace creates PERSONA.md" {
-    const dir = "/tmp/nullclaw-test-scaffold-persona";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const dir = test_tmp.path;
+    const path = try std.fs.path.join(allocator, &.{ dir, "PERSONA.md" });
+    defer allocator.free(path);
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    try scaffoldWorkspace(allocator, dir, &ProjectContext{});
 
-    const path = "/tmp/nullclaw-test-scaffold-persona/PERSONA.md";
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
-    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
-    defer std.testing.allocator.free(content);
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
     try std.testing.expect(content.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, content, "Persona") != null);
 }
 
 test "scaffoldWorkspace creates RULES.md" {
-    const dir = "/tmp/nullclaw-test-scaffold-rules";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const dir = test_tmp.path;
+    const path = try std.fs.path.join(allocator, &.{ dir, "RULES.md" });
+    defer allocator.free(path);
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    try scaffoldWorkspace(allocator, dir, &ProjectContext{});
 
-    const path = "/tmp/nullclaw-test-scaffold-rules/RULES.md";
     const file = try std.fs.openFileAbsolute(path, .{});
     defer file.close();
-    const content = try file.readToEndAlloc(std.testing.allocator, 4096);
-    defer std.testing.allocator.free(content);
+    const content = try file.readToEndAlloc(allocator, 4096);
+    defer allocator.free(content);
     try std.testing.expect(content.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, content, "Rules") != null);
 }
 
 test "scaffoldWorkspace creates memory subdirectory" {
-    const dir = "/tmp/nullclaw-test-scaffold-memdir";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const dir = test_tmp.path;
+    const mem_dir = try std.fs.path.join(allocator, &.{ dir, "memory" });
+    defer allocator.free(mem_dir);
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    try scaffoldWorkspace(allocator, dir, &ProjectContext{});
 
     // Verify memory/ subdirectory exists
-    const mem_dir = "/tmp/nullclaw-test-scaffold-memdir/memory";
     var d = try std.fs.openDirAbsolute(mem_dir, .{});
     d.close();
 }
@@ -1542,14 +1714,12 @@ test "bootstrapTemplate is non-empty" {
 }
 
 test "scaffoldWorkspace creates all prompt.zig files" {
-    const dir = "/tmp/nullclaw-test-scaffold-all";
-    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const dir = test_tmp.path;
 
-    try scaffoldWorkspace(std.testing.allocator, dir, &ProjectContext{});
+    try scaffoldWorkspace(allocator, dir, &ProjectContext{});
 
     // Verify all files that prompt.zig tries to load exist
     const files = [_][]const u8{
@@ -1559,8 +1729,8 @@ test "scaffoldWorkspace creates all prompt.zig files" {
         "BOOTSTRAP.md",
     };
     for (files) |filename| {
-        const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/{s}", .{ dir, filename });
-        defer std.testing.allocator.free(path);
+        const path = try std.fs.path.join(allocator, &.{ dir, filename });
+        defer allocator.free(path);
         const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
             std.debug.print("Missing file: {s} (error: {})\n", .{ filename, err });
             return err;
@@ -1657,19 +1827,23 @@ test "parseModelIds skips entries without id" {
 }
 
 test "cache read returns error for missing file" {
-    const result = readCachedModels(std.testing.allocator, "/tmp/nonexistent-cache-12345.json", "openai");
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const missing_cache_path = try std.fs.path.join(allocator, &.{ test_tmp.path, "nonexistent-cache.json" });
+    defer allocator.free(missing_cache_path);
+
+    const result = readCachedModels(allocator, missing_cache_path, "openai");
     try std.testing.expectError(error.CacheNotFound, result);
 }
 
 test "cache round-trip: write then read fresh cache" {
-    const cache_dir = "/tmp/nullclaw-test-cache-rt";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
-
-    const cache_path = "/tmp/nullclaw-test-cache-rt/models_cache.json";
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const cache_dir = test_tmp.path;
+    const cache_path = try std.fs.path.join(allocator, &.{ cache_dir, "models_cache.json" });
+    defer allocator.free(cache_path);
 
     // Write cache
     const models = [_][]const u8{
@@ -1677,13 +1851,13 @@ test "cache round-trip: write then read fresh cache" {
         "model-beta",
         "model-gamma",
     };
-    try saveCachedModels(std.testing.allocator, cache_path, "testprov", &models);
+    try saveCachedModels(allocator, cache_path, "testprov", &models);
 
     // Read back
-    const loaded = try readCachedModels(std.testing.allocator, cache_path, "testprov");
+    const loaded = try readCachedModels(allocator, cache_path, "testprov");
     defer {
-        for (loaded) |m| std.testing.allocator.free(m);
-        std.testing.allocator.free(loaded);
+        for (loaded) |m| allocator.free(m);
+        allocator.free(loaded);
     }
 
     try std.testing.expect(loaded.len == 3);
@@ -1693,32 +1867,28 @@ test "cache round-trip: write then read fresh cache" {
 }
 
 test "cache read returns error for wrong provider" {
-    const cache_dir = "/tmp/nullclaw-test-cache-wrongprov";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
-
-    const cache_path = "/tmp/nullclaw-test-cache-wrongprov/models_cache.json";
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const cache_dir = test_tmp.path;
+    const cache_path = try std.fs.path.join(allocator, &.{ cache_dir, "models_cache.json" });
+    defer allocator.free(cache_path);
 
     const models = [_][]const u8{"model-a"};
-    try saveCachedModels(std.testing.allocator, cache_path, "provA", &models);
+    try saveCachedModels(allocator, cache_path, "provA", &models);
 
     // Reading for a different provider should fail
-    const result = readCachedModels(std.testing.allocator, cache_path, "provB");
+    const result = readCachedModels(allocator, cache_path, "provB");
     try std.testing.expectError(error.CacheProviderMissing, result);
 }
 
 test "cache read returns error for expired cache" {
-    const cache_dir = "/tmp/nullclaw-test-cache-expired";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
-
-    const cache_path = "/tmp/nullclaw-test-cache-expired/models_cache.json";
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const cache_dir = test_tmp.path;
+    const cache_path = try std.fs.path.join(allocator, &.{ cache_dir, "models_cache.json" });
+    defer allocator.free(cache_path);
 
     // Write a cache with old timestamp
     const old_json = "{\"fetched_at\": 1000000, \"myprov\": [\"old-model\"]}";
@@ -1726,34 +1896,38 @@ test "cache read returns error for expired cache" {
     defer file.close();
     try file.writeAll(old_json);
 
-    const result = readCachedModels(std.testing.allocator, cache_path, "myprov");
+    const result = readCachedModels(allocator, cache_path, "myprov");
     try std.testing.expectError(error.CacheExpired, result);
 }
 
 test "loadModelsWithCache falls back on fetch failure" {
     // openai without api key will fail fetch, falling back to hardcoded list
-    const models = try loadModelsWithCache(std.testing.allocator, "/tmp/nonexistent-dir-xyz", "openai", null);
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const cache_dir = try std.fs.path.join(allocator, &.{ test_tmp.path, "nonexistent-cache-dir" });
+    defer allocator.free(cache_dir);
+
+    const models = try loadModelsWithCache(allocator, cache_dir, "openai", null);
     defer {
-        for (models) |m| std.testing.allocator.free(m);
-        std.testing.allocator.free(models);
+        for (models) |m| allocator.free(m);
+        allocator.free(models);
     }
     try std.testing.expect(models.len >= 3);
     try std.testing.expectEqualStrings("gpt-5.2", models[0]);
 }
 
 test "loadModelsWithCache returns models for anthropic" {
-    const cache_dir = "/tmp/nullclaw-test-cache-anthropic";
-    std.fs.makeDirAbsolute(cache_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    defer std.fs.deleteTreeAbsolute(cache_dir) catch {};
+    const allocator = std.testing.allocator;
+    var test_tmp = try OnboardTestTmpDir.init(allocator);
+    defer test_tmp.deinit(allocator);
+    const cache_dir = test_tmp.path;
 
-    const models = try loadModelsWithCache(std.testing.allocator, cache_dir, "anthropic", null);
+    const models = try loadModelsWithCache(allocator, cache_dir, "anthropic", null);
     // Anthropic returns hardcoded models (allocated copies)
     defer {
-        for (models) |m| std.testing.allocator.free(m);
-        std.testing.allocator.free(models);
+        for (models) |m| allocator.free(m);
+        allocator.free(models);
     }
     try std.testing.expect(models.len == 3);
     try std.testing.expectEqualStrings("claude-opus-4-6", models[0]);

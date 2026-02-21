@@ -13,12 +13,21 @@
 const std = @import("std");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
+const locale = @import("locale.zig");
 const session_mod = @import("session.zig");
 const providers = @import("providers/root.zig");
 const tools_mod = @import("tools/root.zig");
 const memory_mod = @import("memory/root.zig");
 const observability = @import("observability.zig");
 const PairingGuard = @import("security/pairing.zig").PairingGuard;
+
+fn is_zh_ui() bool {
+    return locale.detect_ui_language() == .zh_cn;
+}
+
+pub const RunOptions = struct {
+    log_startup: bool = true,
+};
 
 /// Maximum request body size (64KB) — prevents memory exhaustion.
 pub const MAX_BODY_SIZE: usize = 65_536;
@@ -614,13 +623,19 @@ pub fn sendTelegramReply(allocator: std.mem.Allocator, bot_token: []const u8, ch
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
 /// Endpoints: GET /health, GET /ready, POST /pair, POST /webhook, GET|POST /whatsapp, POST /telegram
 pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
+    return runWithOptions(allocator, host, port, .{});
+}
+
+pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16, options: RunOptions) !void {
+    const zh = is_zh_ui();
     health.markComponentOk("gateway");
 
     var state = GatewayState.init(allocator);
     defer state.deinit();
 
     // Load config and set up in-process SessionManager (graceful degradation if no config).
-    const config_opt: ?Config = Config.load(allocator) catch null;
+    var config_opt: ?Config = Config.load(allocator) catch null;
+    defer if (config_opt) |*cfg| cfg.deinit();
 
     // ProviderHolder: concrete provider struct must outlive the accept loop.
     const ProviderHolder = union(enum) {
@@ -720,12 +735,22 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16) !void {
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
-    try stdout.print("Gateway listening on {s}:{d}\n", .{ host, port });
-    try stdout.flush();
-    if (state.pairing_guard) |*guard| {
-        if (guard.pairingCode()) |code| {
-            try stdout.print("Gateway pairing code: {s}\n", .{code});
-            try stdout.flush();
+    if (options.log_startup) {
+        if (zh) {
+            try stdout.print("网关监听中: {s}:{d}\n", .{ host, port });
+        } else {
+            try stdout.print("Gateway listening on {s}:{d}\n", .{ host, port });
+        }
+        try stdout.flush();
+        if (state.pairing_guard) |*guard| {
+            if (guard.pairingCode()) |code| {
+                if (zh) {
+                    try stdout.print("网关配对码: {s}\n", .{code});
+                } else {
+                    try stdout.print("Gateway pairing code: {s}\n", .{code});
+                }
+                try stdout.flush();
+            }
         }
     }
 

@@ -29,6 +29,38 @@ const Command = enum {
     help,
 };
 
+fn is_zh_ui() bool {
+    return yc.locale.detect_ui_language() == .zh_cn;
+}
+
+fn print_no_config_and_exit() noreturn {
+    if (is_zh_ui()) {
+        std.debug.print("未找到配置，请先运行 `nullclaw onboard`\n", .{});
+    } else {
+        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
+    }
+    std.process.exit(1);
+}
+
+fn enabled_disabled_word(v: bool, zh: bool) []const u8 {
+    if (zh) return if (v) "已启用" else "已禁用";
+    return if (v) "enabled" else "disabled";
+}
+
+fn configured_word(v: bool, zh: bool) []const u8 {
+    if (zh) return if (v) "已配置" else "未配置";
+    return if (v) "configured" else "not configured";
+}
+
+fn print_invalid_port_and_exit(port_arg: []const u8) noreturn {
+    if (is_zh_ui()) {
+        std.debug.print("无效端口: {s}\n", .{port_arg});
+    } else {
+        std.debug.print("Invalid port: {s}\n", .{port_arg});
+    }
+    std.process.exit(1);
+}
+
 fn parseCommand(arg: []const u8) ?Command {
     const command_map = std.StaticStringMap(Command).initComptime(.{
         .{ "agent", .agent },
@@ -65,7 +97,11 @@ pub fn main() !void {
     }
 
     const cmd = parseCommand(args[1]) orelse {
-        std.debug.print("Unknown command: {s}\n\n", .{args[1]});
+        if (is_zh_ui()) {
+            std.debug.print("未知命令: {s}\n\n", .{args[1]});
+        } else {
+            std.debug.print("Unknown command: {s}\n\n", .{args[1]});
+        }
         printUsage();
         std.process.exit(1);
     };
@@ -93,10 +129,10 @@ pub fn main() !void {
 // ── Gateway ──────────────────────────────────────────────────────
 
 fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
-    const cfg = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
+    var cfg = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
     };
+    defer cfg.deinit();
 
     // Config values are the baseline; CLI flags override them.
     var port: u16 = cfg.gateway.port;
@@ -107,8 +143,7 @@ fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
         if ((std.mem.eql(u8, sub_args[i], "--port") or std.mem.eql(u8, sub_args[i], "-p")) and i + 1 < sub_args.len) {
             i += 1;
             port = std.fmt.parseInt(u16, sub_args[i], 10) catch {
-                std.debug.print("Invalid port: {s}\n", .{sub_args[i]});
-                std.process.exit(1);
+                print_invalid_port_and_exit(sub_args[i]);
             };
         } else if (std.mem.eql(u8, sub_args[i], "--host") and i + 1 < sub_args.len) {
             i += 1;
@@ -122,10 +157,10 @@ fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // ── Daemon ───────────────────────────────────────────────────────
 
 fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
-    const cfg = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
+    var cfg = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
     };
+    defer cfg.deinit();
 
     // Config values are the baseline; CLI flags override them.
     var port: u16 = cfg.gateway.port;
@@ -136,8 +171,7 @@ fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         if ((std.mem.eql(u8, sub_args[i], "--port") or std.mem.eql(u8, sub_args[i], "-p")) and i + 1 < sub_args.len) {
             i += 1;
             port = std.fmt.parseInt(u16, sub_args[i], 10) catch {
-                std.debug.print("Invalid port: {s}\n", .{sub_args[i]});
-                std.process.exit(1);
+                print_invalid_port_and_exit(sub_args[i]);
             };
         } else if (std.mem.eql(u8, sub_args[i], "--host") and i + 1 < sub_args.len) {
             i += 1;
@@ -151,8 +185,13 @@ fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
 // ── Service ──────────────────────────────────────────────────────
 
 fn runService(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print("Usage: nullclaw service <install|start|stop|status|uninstall>\n", .{});
+        if (zh) {
+            std.debug.print("用法: nullclaw service <install|start|stop|status|uninstall>\n", .{});
+        } else {
+            std.debug.print("Usage: nullclaw service <install|start|stop|status|uninstall>\n", .{});
+        }
         std.process.exit(1);
     }
 
@@ -168,38 +207,77 @@ fn runService(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
         inline for (map) |entry| {
             if (std.mem.eql(u8, subcmd, entry[0])) break :blk entry[1];
         }
-        std.debug.print("Unknown service command: {s}\n", .{subcmd});
-        std.debug.print("Usage: nullclaw service <install|start|stop|status|uninstall>\n", .{});
+        if (zh) {
+            std.debug.print("未知 service 子命令: {s}\n", .{subcmd});
+            std.debug.print("用法: nullclaw service <install|start|stop|status|uninstall>\n", .{});
+        } else {
+            std.debug.print("Unknown service command: {s}\n", .{subcmd});
+            std.debug.print("Usage: nullclaw service <install|start|stop|status|uninstall>\n", .{});
+        }
         std.process.exit(1);
     };
 
-    const cfg = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
+    var cfg = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
+    };
+    defer cfg.deinit();
+
+    yc.service.handleCommand(allocator, service_cmd, cfg.config_path) catch |err| {
+        if (err == error.UnsupportedPlatform) {
+            if (zh) {
+                std.debug.print("当前平台不支持 service 命令。\n", .{});
+            } else {
+                std.debug.print("Service command is not supported on this platform.\n", .{});
+            }
+        } else {
+            if (zh) {
+                std.debug.print("服务命令失败: {s}\n", .{@errorName(err)});
+            } else {
+                std.debug.print("Service command failed: {s}\n", .{@errorName(err)});
+            }
+        }
         std.process.exit(1);
     };
-
-    try yc.service.handleCommand(allocator, service_cmd, cfg.config_path);
 }
 
 // ── Cron ─────────────────────────────────────────────────────────
 
 fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print(
-            \\Usage: nullclaw cron <command> [args]
-            \\
-            \\Commands:
-            \\  list                          List all scheduled tasks
-            \\  add <expression> <command>    Add a recurring cron job
-            \\  once <delay> <command>        Add a one-shot delayed task
-            \\  remove <id>                   Remove a scheduled task
-            \\  pause <id>                    Pause a scheduled task
-            \\  resume <id>                   Resume a paused task
-            \\  run <id>                      Run a scheduled task immediately
-            \\  update <id> [options]         Update a cron job
-            \\  runs <id>                     List recent run history for a job
-            \\
-        , .{});
+        if (zh) {
+            std.debug.print(
+                \\用法: nullclaw cron <command> [args]
+                \\
+                \\命令:
+                \\  list                          列出全部定时任务
+                \\  add <expression> <command>    添加周期任务
+                \\  once <delay> <command>        添加一次性延迟任务
+                \\  remove <id>                   删除定时任务
+                \\  pause <id>                    暂停定时任务
+                \\  resume <id>                   恢复已暂停任务
+                \\  run <id>                      立即执行指定任务
+                \\  update <id> [options]         更新任务配置
+                \\  runs <id>                     查看任务执行历史
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\Usage: nullclaw cron <command> [args]
+                \\
+                \\Commands:
+                \\  list                          List all scheduled tasks
+                \\  add <expression> <command>    Add a recurring cron job
+                \\  once <delay> <command>        Add a one-shot delayed task
+                \\  remove <id>                   Remove a scheduled task
+                \\  pause <id>                    Pause a scheduled task
+                \\  resume <id>                   Resume a paused task
+                \\  run <id>                      Run a scheduled task immediately
+                \\  update <id> [options]         Update a cron job
+                \\  runs <id>                     List recent run history for a job
+                \\
+            , .{});
+        }
         std.process.exit(1);
     }
 
@@ -209,43 +287,43 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         try yc.cron.cliListJobs(allocator);
     } else if (std.mem.eql(u8, subcmd, "add")) {
         if (sub_args.len < 3) {
-            std.debug.print("Usage: nullclaw cron add <expression> <command>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron add <expression> <command>\n", .{}) else std.debug.print("Usage: nullclaw cron add <expression> <command>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliAddJob(allocator, sub_args[1], sub_args[2]);
     } else if (std.mem.eql(u8, subcmd, "once")) {
         if (sub_args.len < 3) {
-            std.debug.print("Usage: nullclaw cron once <delay> <command>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron once <delay> <command>\n", .{}) else std.debug.print("Usage: nullclaw cron once <delay> <command>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliAddOnce(allocator, sub_args[1], sub_args[2]);
     } else if (std.mem.eql(u8, subcmd, "remove")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron remove <id>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron remove <id>\n", .{}) else std.debug.print("Usage: nullclaw cron remove <id>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliRemoveJob(allocator, sub_args[1]);
     } else if (std.mem.eql(u8, subcmd, "pause")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron pause <id>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron pause <id>\n", .{}) else std.debug.print("Usage: nullclaw cron pause <id>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliPauseJob(allocator, sub_args[1]);
     } else if (std.mem.eql(u8, subcmd, "resume")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron resume <id>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron resume <id>\n", .{}) else std.debug.print("Usage: nullclaw cron resume <id>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliResumeJob(allocator, sub_args[1]);
     } else if (std.mem.eql(u8, subcmd, "run")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron run <id>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron run <id>\n", .{}) else std.debug.print("Usage: nullclaw cron run <id>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliRunJob(allocator, sub_args[1]);
     } else if (std.mem.eql(u8, subcmd, "update")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron update <id> [--expression <expr>] [--command <cmd>] [--enable] [--disable]\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron update <id> [--expression <expr>] [--command <cmd>] [--enable] [--disable]\n", .{}) else std.debug.print("Usage: nullclaw cron update <id> [--expression <expr>] [--command <cmd>] [--enable] [--disable]\n", .{});
             std.process.exit(1);
         }
         const id = sub_args[1];
@@ -269,12 +347,16 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         try yc.cron.cliUpdateJob(allocator, id, expression, command, enabled);
     } else if (std.mem.eql(u8, subcmd, "runs")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw cron runs <id>\n", .{});
+            if (zh) std.debug.print("用法: nullclaw cron runs <id>\n", .{}) else std.debug.print("Usage: nullclaw cron runs <id>\n", .{});
             std.process.exit(1);
         }
         try yc.cron.cliListRuns(allocator, sub_args[1]);
     } else {
-        std.debug.print("Unknown cron command: {s}\n", .{subcmd});
+        if (zh) {
+            std.debug.print("未知 cron 子命令: {s}\n", .{subcmd});
+        } else {
+            std.debug.print("Unknown cron command: {s}\n", .{subcmd});
+        }
         std.process.exit(1);
     }
 }
@@ -282,66 +364,116 @@ fn runCron(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
 // ── Channel ──────────────────────────────────────────────────────
 
 fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print(
-            \\Usage: nullclaw channel <command> [args]
-            \\
-            \\Commands:
-            \\  list                          List configured channels
-            \\  start                         Start all configured channels
-            \\  doctor                        Run health checks
-            \\  add <type> <config_json>      Add a channel
-            \\  remove <name>                 Remove a channel
-            \\
-        , .{});
+        if (zh) {
+            std.debug.print(
+                \\用法: nullclaw channel <command> [args]
+                \\
+                \\命令:
+                \\  list                          列出已配置频道
+                \\  start                         启动已配置频道
+                \\  doctor                        运行频道健康检查
+                \\  add <type> <config_json>      添加频道
+                \\  remove <name>                 删除频道
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\Usage: nullclaw channel <command> [args]
+                \\
+                \\Commands:
+                \\  list                          List configured channels
+                \\  start                         Start all configured channels
+                \\  doctor                        Run health checks
+                \\  add <type> <config_json>      Add a channel
+                \\  remove <name>                 Remove a channel
+                \\
+            , .{});
+        }
         std.process.exit(1);
     }
 
     const subcmd = sub_args[0];
 
-    const cfg = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
+    var cfg = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
     };
+    defer cfg.deinit();
 
     if (std.mem.eql(u8, subcmd, "list")) {
-        std.debug.print("Configured channels:\n", .{});
-        std.debug.print("  CLI:       {s}\n", .{if (cfg.channels.cli) "enabled" else "disabled"});
-        std.debug.print("  Telegram:  {s}\n", .{if (cfg.channels.telegram != null) "configured" else "not configured"});
-        std.debug.print("  Discord:   {s}\n", .{if (cfg.channels.discord != null) "configured" else "not configured"});
-        std.debug.print("  Slack:     {s}\n", .{if (cfg.channels.slack != null) "configured" else "not configured"});
-        std.debug.print("  Webhook:   {s}\n", .{if (cfg.channels.webhook != null) "configured" else "not configured"});
-        std.debug.print("  iMessage:  {s}\n", .{if (cfg.channels.imessage != null) "configured" else "not configured"});
-        std.debug.print("  Matrix:    {s}\n", .{if (cfg.channels.matrix != null) "configured" else "not configured"});
-        std.debug.print("  WhatsApp:  {s}\n", .{if (cfg.channels.whatsapp != null) "configured" else "not configured"});
-        std.debug.print("  IRC:       {s}\n", .{if (cfg.channels.irc != null) "configured" else "not configured"});
-        std.debug.print("  Lark:      {s}\n", .{if (cfg.channels.lark != null) "configured" else "not configured"});
-        std.debug.print("  DingTalk:  {s}\n", .{if (cfg.channels.dingtalk != null) "configured" else "not configured"});
+        if (zh) {
+            std.debug.print("已配置频道:\n", .{});
+        } else {
+            std.debug.print("Configured channels:\n", .{});
+        }
+        std.debug.print("  CLI:       {s}\n", .{enabled_disabled_word(cfg.channels.cli, zh)});
+        std.debug.print("  Telegram:  {s}\n", .{configured_word(cfg.channels.telegram != null, zh)});
+        std.debug.print("  Discord:   {s}\n", .{configured_word(cfg.channels.discord != null, zh)});
+        std.debug.print("  Slack:     {s}\n", .{configured_word(cfg.channels.slack != null, zh)});
+        std.debug.print("  Webhook:   {s}\n", .{configured_word(cfg.channels.webhook != null, zh)});
+        std.debug.print("  iMessage:  {s}\n", .{configured_word(cfg.channels.imessage != null, zh)});
+        std.debug.print("  Matrix:    {s}\n", .{configured_word(cfg.channels.matrix != null, zh)});
+        std.debug.print("  WhatsApp:  {s}\n", .{configured_word(cfg.channels.whatsapp != null, zh)});
+        std.debug.print("  IRC:       {s}\n", .{configured_word(cfg.channels.irc != null, zh)});
+        std.debug.print("  Lark:      {s}\n", .{configured_word(cfg.channels.lark != null, zh)});
+        std.debug.print("  DingTalk:  {s}\n", .{configured_word(cfg.channels.dingtalk != null, zh)});
     } else if (std.mem.eql(u8, subcmd, "start")) {
         try runChannelStart(allocator, sub_args[1..]);
     } else if (std.mem.eql(u8, subcmd, "doctor")) {
-        std.debug.print("Channel health:\n", .{});
-        std.debug.print("  CLI:      ok\n", .{});
-        if (cfg.channels.telegram != null) std.debug.print("  Telegram: configured (use `channel start` to verify)\n", .{});
-        if (cfg.channels.discord != null) std.debug.print("  Discord:  configured (use `channel start` to verify)\n", .{});
-        if (cfg.channels.slack != null) std.debug.print("  Slack:    configured (use `channel start` to verify)\n", .{});
+        if (zh) {
+            std.debug.print("频道健康:\n", .{});
+            std.debug.print("  CLI:      正常\n", .{});
+            if (cfg.channels.telegram != null) std.debug.print("  Telegram: 已配置（可用 `channel start` 验证）\n", .{});
+            if (cfg.channels.discord != null) std.debug.print("  Discord:  已配置（可用 `channel start` 验证）\n", .{});
+            if (cfg.channels.slack != null) std.debug.print("  Slack:    已配置（可用 `channel start` 验证）\n", .{});
+        } else {
+            std.debug.print("Channel health:\n", .{});
+            std.debug.print("  CLI:      ok\n", .{});
+            if (cfg.channels.telegram != null) std.debug.print("  Telegram: configured (use `channel start` to verify)\n", .{});
+            if (cfg.channels.discord != null) std.debug.print("  Discord:  configured (use `channel start` to verify)\n", .{});
+            if (cfg.channels.slack != null) std.debug.print("  Slack:    configured (use `channel start` to verify)\n", .{});
+        }
     } else if (std.mem.eql(u8, subcmd, "add")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw channel add <type>\n", .{});
-            std.debug.print("Types: telegram, discord, slack, webhook, matrix, whatsapp, irc, lark, dingtalk\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw channel add <type>\n", .{});
+                std.debug.print("类型: telegram, discord, slack, webhook, matrix, whatsapp, irc, lark, dingtalk\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw channel add <type>\n", .{});
+                std.debug.print("Types: telegram, discord, slack, webhook, matrix, whatsapp, irc, lark, dingtalk\n", .{});
+            }
             std.process.exit(1);
         }
-        std.debug.print("To add a '{s}' channel, edit your config file:\n  {s}\n", .{ sub_args[1], cfg.config_path });
-        std.debug.print("Add a \"{s}\" object under \"channels\" with the required fields.\n", .{sub_args[1]});
+        if (zh) {
+            std.debug.print("如需添加 '{s}' 频道，请编辑配置文件:\n  {s}\n", .{ sub_args[1], cfg.config_path });
+            std.debug.print("在 \"channels\" 下新增 \"{s}\" 对象并填写必填字段。\n", .{sub_args[1]});
+        } else {
+            std.debug.print("To add a '{s}' channel, edit your config file:\n  {s}\n", .{ sub_args[1], cfg.config_path });
+            std.debug.print("Add a \"{s}\" object under \"channels\" with the required fields.\n", .{sub_args[1]});
+        }
     } else if (std.mem.eql(u8, subcmd, "remove")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw channel remove <name>\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw channel remove <name>\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw channel remove <name>\n", .{});
+            }
             std.process.exit(1);
         }
-        std.debug.print("To remove the '{s}' channel, edit your config file:\n  {s}\n", .{ sub_args[1], cfg.config_path });
-        std.debug.print("Remove or set the \"{s}\" object to null under \"channels\".\n", .{sub_args[1]});
+        if (zh) {
+            std.debug.print("如需移除 '{s}' 频道，请编辑配置文件:\n  {s}\n", .{ sub_args[1], cfg.config_path });
+            std.debug.print("删除 \"channels\" 下的 \"{s}\" 对象，或将其设置为 null。\n", .{sub_args[1]});
+        } else {
+            std.debug.print("To remove the '{s}' channel, edit your config file:\n  {s}\n", .{ sub_args[1], cfg.config_path });
+            std.debug.print("Remove or set the \"{s}\" object to null under \"channels\".\n", .{sub_args[1]});
+        }
     } else {
-        std.debug.print("Unknown channel command: {s}\n", .{subcmd});
+        if (zh) {
+            std.debug.print("未知 channel 子命令: {s}\n", .{subcmd});
+        } else {
+            std.debug.print("Unknown channel command: {s}\n", .{subcmd});
+        }
         std.process.exit(1);
     }
 }
@@ -349,38 +481,64 @@ fn runChannel(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // ── Skills ───────────────────────────────────────────────────────
 
 fn runSkills(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print(
-            \\Usage: nullclaw skills <command> [args]
-            \\
-            \\Commands:
-            \\  list                          List installed skills
-            \\  install <source>              Install from GitHub URL or path
-            \\  remove <name>                 Remove a skill
-            \\  info <name>                   Show skill details
-            \\
-        , .{});
+        if (zh) {
+            std.debug.print(
+                \\用法: nullclaw skills <command> [args]
+                \\
+                \\命令:
+                \\  list                          列出已安装技能
+                \\  install <source>              从 GitHub URL 或路径安装
+                \\  remove <name>                 删除技能
+                \\  info <name>                   查看技能详情
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\Usage: nullclaw skills <command> [args]
+                \\
+                \\Commands:
+                \\  list                          List installed skills
+                \\  install <source>              Install from GitHub URL or path
+                \\  remove <name>                 Remove a skill
+                \\  info <name>                   Show skill details
+                \\
+            , .{});
+        }
         std.process.exit(1);
     }
 
-    const cfg = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
+    var cfg = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
     };
+    defer cfg.deinit();
 
     const subcmd = sub_args[0];
 
     if (std.mem.eql(u8, subcmd, "list")) {
         const skills_list = yc.skills.listSkills(allocator, cfg.workspace_dir) catch |err| {
-            std.debug.print("Failed to list skills: {s}\n", .{@errorName(err)});
+            if (zh) {
+                std.debug.print("列出技能失败: {s}\n", .{@errorName(err)});
+            } else {
+                std.debug.print("Failed to list skills: {s}\n", .{@errorName(err)});
+            }
             std.process.exit(1);
         };
         defer yc.skills.freeSkills(allocator, skills_list);
 
         if (skills_list.len == 0) {
-            std.debug.print("No skills installed.\n", .{});
+            if (zh) {
+                std.debug.print("未安装任何技能。\n", .{});
+            } else {
+                std.debug.print("No skills installed.\n", .{});
+            }
         } else {
-            std.debug.print("Installed skills ({d}):\n", .{skills_list.len});
+            if (zh) {
+                std.debug.print("已安装技能（{d}）:\n", .{skills_list.len});
+            } else {
+                std.debug.print("Installed skills ({d}):\n", .{skills_list.len});
+            }
             for (skills_list) |skill| {
                 std.debug.print("  {s} v{s}", .{ skill.name, skill.version });
                 if (skill.description.len > 0) {
@@ -391,55 +549,116 @@ fn runSkills(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
         }
     } else if (std.mem.eql(u8, subcmd, "install")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw skills install <source>\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw skills install <source>\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw skills install <source>\n", .{});
+            }
             std.process.exit(1);
         }
         yc.skills.installSkillFromPath(allocator, sub_args[1], cfg.workspace_dir) catch |err| {
-            std.debug.print("Failed to install skill: {s}\n", .{@errorName(err)});
+            if (zh) {
+                std.debug.print("安装技能失败: {s}\n", .{@errorName(err)});
+            } else {
+                std.debug.print("Failed to install skill: {s}\n", .{@errorName(err)});
+            }
             std.process.exit(1);
         };
-        std.debug.print("Skill installed from: {s}\n", .{sub_args[1]});
+        if (zh) {
+            std.debug.print("技能安装来源: {s}\n", .{sub_args[1]});
+        } else {
+            std.debug.print("Skill installed from: {s}\n", .{sub_args[1]});
+        }
     } else if (std.mem.eql(u8, subcmd, "remove")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw skills remove <name>\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw skills remove <name>\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw skills remove <name>\n", .{});
+            }
             std.process.exit(1);
         }
         yc.skills.removeSkill(allocator, sub_args[1], cfg.workspace_dir) catch |err| {
-            std.debug.print("Failed to remove skill '{s}': {s}\n", .{ sub_args[1], @errorName(err) });
+            if (zh) {
+                std.debug.print("移除技能 '{s}' 失败: {s}\n", .{ sub_args[1], @errorName(err) });
+            } else {
+                std.debug.print("Failed to remove skill '{s}': {s}\n", .{ sub_args[1], @errorName(err) });
+            }
             std.process.exit(1);
         };
-        std.debug.print("Removed skill: {s}\n", .{sub_args[1]});
+        if (zh) {
+            std.debug.print("已移除技能: {s}\n", .{sub_args[1]});
+        } else {
+            std.debug.print("Removed skill: {s}\n", .{sub_args[1]});
+        }
     } else if (std.mem.eql(u8, subcmd, "info")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw skills info <name>\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw skills info <name>\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw skills info <name>\n", .{});
+            }
             std.process.exit(1);
         }
-        const skill_path = std.fmt.allocPrint(allocator, "{s}/skills/{s}", .{ cfg.workspace_dir, sub_args[1] }) catch {
-            std.debug.print("Out of memory\n", .{});
+        const skill_path = std.fs.path.join(allocator, &.{ cfg.workspace_dir, "skills", sub_args[1] }) catch {
+            if (zh) {
+                std.debug.print("内存不足\n", .{});
+            } else {
+                std.debug.print("Out of memory\n", .{});
+            }
             std.process.exit(1);
         };
         defer allocator.free(skill_path);
 
         const skill = yc.skills.loadSkill(allocator, skill_path) catch {
-            std.debug.print("Skill '{s}' not found or invalid.\n", .{sub_args[1]});
+            if (zh) {
+                std.debug.print("技能 '{s}' 不存在或无效。\n", .{sub_args[1]});
+            } else {
+                std.debug.print("Skill '{s}' not found or invalid.\n", .{sub_args[1]});
+            }
             std.process.exit(1);
         };
         defer yc.skills.freeSkill(allocator, &skill);
 
-        std.debug.print("Skill: {s}\n", .{skill.name});
-        std.debug.print("  Version:     {s}\n", .{skill.version});
+        if (zh) {
+            std.debug.print("技能: {s}\n", .{skill.name});
+            std.debug.print("  版本:        {s}\n", .{skill.version});
+        } else {
+            std.debug.print("Skill: {s}\n", .{skill.name});
+            std.debug.print("  Version:     {s}\n", .{skill.version});
+        }
         if (skill.description.len > 0) {
-            std.debug.print("  Description: {s}\n", .{skill.description});
+            if (zh) {
+                std.debug.print("  描述:        {s}\n", .{skill.description});
+            } else {
+                std.debug.print("  Description: {s}\n", .{skill.description});
+            }
         }
         if (skill.author.len > 0) {
-            std.debug.print("  Author:      {s}\n", .{skill.author});
+            if (zh) {
+                std.debug.print("  作者:        {s}\n", .{skill.author});
+            } else {
+                std.debug.print("  Author:      {s}\n", .{skill.author});
+            }
         }
-        std.debug.print("  Enabled:     {}\n", .{skill.enabled});
+        if (zh) {
+            std.debug.print("  启用:        {}\n", .{skill.enabled});
+        } else {
+            std.debug.print("  Enabled:     {}\n", .{skill.enabled});
+        }
         if (skill.instructions.len > 0) {
-            std.debug.print("  Instructions: {d} bytes\n", .{skill.instructions.len});
+            if (zh) {
+                std.debug.print("  指令长度:    {d} 字节\n", .{skill.instructions.len});
+            } else {
+                std.debug.print("  Instructions: {d} bytes\n", .{skill.instructions.len});
+            }
         }
     } else {
-        std.debug.print("Unknown skills command: {s}\n", .{subcmd});
+        if (zh) {
+            std.debug.print("未知 skills 子命令: {s}\n", .{subcmd});
+        } else {
+            std.debug.print("Unknown skills command: {s}\n", .{subcmd});
+        }
         std.process.exit(1);
     }
 }
@@ -447,35 +666,65 @@ fn runSkills(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
 // ── Hardware ─────────────────────────────────────────────────────
 
 fn runHardware(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print(
-            \\Usage: nullclaw hardware <command> [args]
-            \\
-            \\Commands:
-            \\  scan                          Scan for connected hardware
-            \\  flash                         Flash firmware to a device
-            \\  monitor                       Monitor connected devices
-            \\
-        , .{});
+        if (zh) {
+            std.debug.print(
+                \\用法: nullclaw hardware <command> [args]
+                \\
+                \\命令:
+                \\  scan                          扫描已连接硬件
+                \\  flash                         烧录固件到设备
+                \\  monitor                       监控已连接设备
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\Usage: nullclaw hardware <command> [args]
+                \\
+                \\Commands:
+                \\  scan                          Scan for connected hardware
+                \\  flash                         Flash firmware to a device
+                \\  monitor                       Monitor connected devices
+                \\
+            , .{});
+        }
         std.process.exit(1);
     }
 
     const subcmd = sub_args[0];
 
     if (std.mem.eql(u8, subcmd, "scan")) {
-        std.debug.print("Scanning for hardware devices...\n", .{});
-        std.debug.print("Known board registry: {d} entries\n", .{yc.hardware.knownBoards().len});
+        if (zh) {
+            std.debug.print("正在扫描硬件设备...\n", .{});
+            std.debug.print("已知板卡注册表: {d} 条\n", .{yc.hardware.knownBoards().len});
+        } else {
+            std.debug.print("Scanning for hardware devices...\n", .{});
+            std.debug.print("Known board registry: {d} entries\n", .{yc.hardware.knownBoards().len});
+        }
 
         const devices = yc.hardware.discoverHardware(allocator) catch |err| {
-            std.debug.print("Discovery failed: {s}\n", .{@errorName(err)});
+            if (zh) {
+                std.debug.print("扫描失败: {s}\n", .{@errorName(err)});
+            } else {
+                std.debug.print("Discovery failed: {s}\n", .{@errorName(err)});
+            }
             std.process.exit(1);
         };
         defer yc.hardware.freeDiscoveredDevices(allocator, devices);
 
         if (devices.len == 0) {
-            std.debug.print("No recognized devices found.\n", .{});
+            if (zh) {
+                std.debug.print("未发现可识别设备。\n", .{});
+            } else {
+                std.debug.print("No recognized devices found.\n", .{});
+            }
         } else {
-            std.debug.print("Discovered {d} device(s):\n", .{devices.len});
+            if (zh) {
+                std.debug.print("发现 {d} 个设备:\n", .{devices.len});
+            } else {
+                std.debug.print("Discovered {d} device(s):\n", .{devices.len});
+            }
             for (devices) |dev| {
                 std.debug.print("  {s}", .{dev.name});
                 if (dev.detail) |det| {
@@ -489,14 +738,30 @@ fn runHardware(allocator: std.mem.Allocator, sub_args: []const []const u8) !void
         }
     } else if (std.mem.eql(u8, subcmd, "flash")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw hardware flash <firmware_file> [--target <board>]\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw hardware flash <firmware_file> [--target <board>]\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw hardware flash <firmware_file> [--target <board>]\n", .{});
+            }
             std.process.exit(1);
         }
-        std.debug.print("Flash not yet implemented. Firmware file: {s}\n", .{sub_args[1]});
+        if (zh) {
+            std.debug.print("Flash 功能尚未实现。固件文件: {s}\n", .{sub_args[1]});
+        } else {
+            std.debug.print("Flash not yet implemented. Firmware file: {s}\n", .{sub_args[1]});
+        }
     } else if (std.mem.eql(u8, subcmd, "monitor")) {
-        std.debug.print("Monitor not yet implemented. Use `nullclaw hardware scan` to discover devices first.\n", .{});
+        if (zh) {
+            std.debug.print("Monitor 功能尚未实现。请先执行 `nullclaw hardware scan` 扫描设备。\n", .{});
+        } else {
+            std.debug.print("Monitor not yet implemented. Use `nullclaw hardware scan` to discover devices first.\n", .{});
+        }
     } else {
-        std.debug.print("Unknown hardware command: {s}\n", .{subcmd});
+        if (zh) {
+            std.debug.print("未知 hardware 子命令: {s}\n", .{subcmd});
+        } else {
+            std.debug.print("Unknown hardware command: {s}\n", .{subcmd});
+        }
         std.process.exit(1);
     }
 }
@@ -504,18 +769,33 @@ fn runHardware(allocator: std.mem.Allocator, sub_args: []const []const u8) !void
 // ── Migrate ──────────────────────────────────────────────────────
 
 fn runMigrate(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print(
-            \\Usage: nullclaw migrate <source> [options]
-            \\
-            \\Sources:
-            \\  openclaw                      Import from OpenClaw workspace
-            \\
-            \\Options:
-            \\  --dry-run                     Preview without writing
-            \\  --source <path>               Source workspace path
-            \\
-        , .{});
+        if (zh) {
+            std.debug.print(
+                \\用法: nullclaw migrate <source> [options]
+                \\
+                \\来源:
+                \\  openclaw                      从 OpenClaw 工作目录导入
+                \\
+                \\选项:
+                \\  --dry-run                     仅预览，不写入
+                \\  --source <path>               源工作目录路径
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\Usage: nullclaw migrate <source> [options]
+                \\
+                \\Sources:
+                \\  openclaw                      Import from OpenClaw workspace
+                \\
+                \\Options:
+                \\  --dry-run                     Preview without writing
+                \\  --source <path>               Source workspace path
+                \\
+            , .{});
+        }
         std.process.exit(1);
     }
 
@@ -533,22 +813,34 @@ fn runMigrate(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
             }
         }
 
-        const cfg = yc.config.Config.load(allocator) catch {
-            std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-            std.process.exit(1);
+        var cfg = yc.config.Config.load(allocator) catch {
+            print_no_config_and_exit();
         };
+        defer cfg.deinit();
 
         const stats = yc.migration.migrateOpenclaw(allocator, &cfg, source_path, dry_run) catch |err| {
-            std.debug.print("Migration failed: {s}\n", .{@errorName(err)});
+            if (zh) {
+                std.debug.print("迁移失败: {s}\n", .{@errorName(err)});
+            } else {
+                std.debug.print("Migration failed: {s}\n", .{@errorName(err)});
+            }
             std.process.exit(1);
         };
 
         if (dry_run) {
             std.debug.print("[DRY RUN] ", .{});
         }
-        std.debug.print("Migration complete: {d} imported, {d} skipped\n", .{ stats.imported, stats.skipped_unchanged });
+        if (zh) {
+            std.debug.print("迁移完成: 导入 {d} 条, 跳过 {d} 条\n", .{ stats.imported, stats.skipped_unchanged });
+        } else {
+            std.debug.print("Migration complete: {d} imported, {d} skipped\n", .{ stats.imported, stats.skipped_unchanged });
+        }
     } else {
-        std.debug.print("Unknown migration source: {s}\n", .{sub_args[0]});
+        if (zh) {
+            std.debug.print("未知迁移来源: {s}\n", .{sub_args[0]});
+        } else {
+            std.debug.print("Unknown migration source: {s}\n", .{sub_args[0]});
+        }
         std.process.exit(1);
     }
 }
@@ -556,55 +848,112 @@ fn runMigrate(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // ── Models ───────────────────────────────────────────────────────
 
 fn runModels(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
     if (sub_args.len < 1) {
-        std.debug.print(
-            \\Usage: nullclaw models <command>
-            \\
-            \\Commands:
-            \\  list                          List available models
-            \\  info <model>                  Show model details
-            \\  benchmark                     Run model latency benchmark
-            \\  refresh                       Refresh model catalog
-            \\
-        , .{});
+        if (zh) {
+            std.debug.print(
+                \\用法: nullclaw models <command>
+                \\
+                \\命令:
+                \\  list                          列出可用模型
+                \\  info <model>                  查看模型详情
+                \\  benchmark                     运行模型延迟基准
+                \\  refresh                       刷新模型目录缓存
+                \\
+            , .{});
+        } else {
+            std.debug.print(
+                \\Usage: nullclaw models <command>
+                \\
+                \\Commands:
+                \\  list                          List available models
+                \\  info <model>                  Show model details
+                \\  benchmark                     Run model latency benchmark
+                \\  refresh                       Refresh model catalog
+                \\
+            , .{});
+        }
         std.process.exit(1);
     }
 
     const subcmd = sub_args[0];
 
     if (std.mem.eql(u8, subcmd, "list")) {
-        const cfg = yc.config.Config.load(allocator) catch null;
+        var cfg_opt: ?yc.config.Config = yc.config.Config.load(allocator) catch null;
+        defer if (cfg_opt) |*c| c.deinit();
 
-        std.debug.print("Current configuration:\n", .{});
-        if (cfg) |c| {
-            std.debug.print("  Provider: {s}\n", .{c.default_provider});
-            std.debug.print("  Model:    {s}\n", .{c.default_model orelse "(not set)"});
-            std.debug.print("  Temp:     {d:.1}\n\n", .{c.default_temperature});
+        if (zh) {
+            std.debug.print("当前配置:\n", .{});
         } else {
-            std.debug.print("  (no config -- run `nullclaw onboard` first)\n\n", .{});
+            std.debug.print("Current configuration:\n", .{});
+        }
+        if (cfg_opt) |*c| {
+            if (zh) {
+                std.debug.print("  提供商: {s}\n", .{c.default_provider});
+                std.debug.print("  模型:   {s}\n", .{c.default_model orelse "(未设置)"});
+                std.debug.print("  温度:   {d:.1}\n\n", .{c.default_temperature});
+            } else {
+                std.debug.print("  Provider: {s}\n", .{c.default_provider});
+                std.debug.print("  Model:    {s}\n", .{c.default_model orelse "(not set)"});
+                std.debug.print("  Temp:     {d:.1}\n\n", .{c.default_temperature});
+            }
+        } else {
+            if (zh) {
+                std.debug.print("  （未找到配置，请先运行 `nullclaw onboard`）\n\n", .{});
+            } else {
+                std.debug.print("  (no config -- run `nullclaw onboard` first)\n\n", .{});
+            }
         }
 
-        std.debug.print("Known providers and default models:\n", .{});
+        if (zh) {
+            std.debug.print("已知提供商及默认模型:\n", .{});
+        } else {
+            std.debug.print("Known providers and default models:\n", .{});
+        }
         for (yc.onboard.known_providers) |p| {
             std.debug.print("  {s:<12} {s:<36} {s}\n", .{ p.key, p.default_model, p.label });
         }
-        std.debug.print("\nUse `nullclaw models info <model>` for details.\n", .{});
+        if (zh) {
+            std.debug.print("\n可使用 `nullclaw models info <model>` 查看详情。\n", .{});
+        } else {
+            std.debug.print("\nUse `nullclaw models info <model>` for details.\n", .{});
+        }
     } else if (std.mem.eql(u8, subcmd, "info")) {
         if (sub_args.len < 2) {
-            std.debug.print("Usage: nullclaw models info <model>\n", .{});
+            if (zh) {
+                std.debug.print("用法: nullclaw models info <model>\n", .{});
+            } else {
+                std.debug.print("Usage: nullclaw models info <model>\n", .{});
+            }
             std.process.exit(1);
         }
-        std.debug.print("Model: {s}\n", .{sub_args[1]});
-        std.debug.print("  Default provider: {s}\n", .{yc.onboard.canonicalProviderName(sub_args[1])});
-        std.debug.print("  Context: varies by provider\n", .{});
-        std.debug.print("  Pricing: see provider dashboard\n", .{});
+        if (zh) {
+            std.debug.print("模型: {s}\n", .{sub_args[1]});
+            std.debug.print("  默认提供商: {s}\n", .{yc.onboard.canonicalProviderName(sub_args[1])});
+            std.debug.print("  上下文: 取决于提供商\n", .{});
+            std.debug.print("  定价: 请查看提供商后台\n", .{});
+        } else {
+            std.debug.print("Model: {s}\n", .{sub_args[1]});
+            std.debug.print("  Default provider: {s}\n", .{yc.onboard.canonicalProviderName(sub_args[1])});
+            std.debug.print("  Context: varies by provider\n", .{});
+            std.debug.print("  Pricing: see provider dashboard\n", .{});
+        }
     } else if (std.mem.eql(u8, subcmd, "benchmark")) {
-        std.debug.print("Running model latency benchmark...\n", .{});
-        std.debug.print("Configure a provider first (nullclaw onboard).\n", .{});
+        if (zh) {
+            std.debug.print("正在运行模型延迟基准...\n", .{});
+            std.debug.print("请先配置 provider（运行 nullclaw onboard）。\n", .{});
+        } else {
+            std.debug.print("Running model latency benchmark...\n", .{});
+            std.debug.print("Configure a provider first (nullclaw onboard).\n", .{});
+        }
     } else if (std.mem.eql(u8, subcmd, "refresh")) {
         try yc.onboard.runModelsRefresh(allocator);
     } else {
-        std.debug.print("Unknown models command: {s}\n", .{subcmd});
+        if (zh) {
+            std.debug.print("未知 models 子命令: {s}\n", .{subcmd});
+        } else {
+            std.debug.print("Unknown models command: {s}\n", .{subcmd});
+        }
         std.process.exit(1);
     }
 }
@@ -648,15 +997,21 @@ fn runOnboard(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
 // ── Channel Start (Telegram bot loop) ────────────────────────────
 
 fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const zh = is_zh_ui();
     // Load config
-    const config = yc.config.Config.load(allocator) catch {
-        std.debug.print("No config found -- run `nullclaw onboard` first\n", .{});
-        std.process.exit(1);
+    var config = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
     };
+    defer config.deinit();
 
     const telegram_config = config.channels.telegram orelse {
-        std.debug.print("Telegram not configured. Add to config.json:\n", .{});
-        std.debug.print("  \"channels\": {{\"telegram\": {{\"accounts\": {{\"main\": {{\"bot_token\": \"...\"}}}}}}}}\n", .{});
+        if (zh) {
+            std.debug.print("Telegram 未配置。请在 config.json 添加:\n", .{});
+            std.debug.print("  \"channels\": {{\"telegram\": {{\"accounts\": {{\"main\": {{\"bot_token\": \"...\"}}}}}}}}\n", .{});
+        } else {
+            std.debug.print("Telegram not configured. Add to config.json:\n", .{});
+            std.debug.print("  \"channels\": {{\"telegram\": {{\"accounts\": {{\"main\": {{\"bot_token\": \"...\"}}}}}}}}\n", .{});
+        }
         std.process.exit(1);
     };
 
@@ -678,24 +1033,48 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         telegram_config.allow_from;
 
     if (config.defaultProviderKey() == null) {
-        std.debug.print("No API key configured. Add to ~/.nullclaw/config.json:\n", .{});
-        std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
+        if (zh) {
+            std.debug.print("未配置 API key。请在 ~/.nullclaw/config.json 添加:\n", .{});
+            std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
+        } else {
+            std.debug.print("No API key configured. Add to ~/.nullclaw/config.json:\n", .{});
+            std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
+        }
         std.process.exit(1);
     }
 
     const model = config.default_model orelse "anthropic/claude-3.5-sonnet";
     const temperature = config.default_temperature;
 
-    std.debug.print("nullclaw telegram bot starting...\n", .{});
-    std.debug.print("  Provider: {s}\n", .{config.default_provider});
-    std.debug.print("  Model: {s}\n", .{model});
-    std.debug.print("  Temperature: {d:.1}\n", .{temperature});
-    if (allowed.len == 0) {
-        std.debug.print("  Allowed users: (none — all messages will be denied)\n", .{});
-    } else if (allowed.len == 1 and std.mem.eql(u8, allowed[0], "*")) {
-        std.debug.print("  Allowed users: *\n", .{});
+    if (zh) {
+        std.debug.print("nullclaw Telegram 机器人启动中...\n", .{});
+        std.debug.print("  提供商: {s}\n", .{config.default_provider});
+        std.debug.print("  模型: {s}\n", .{model});
+        std.debug.print("  温度: {d:.1}\n", .{temperature});
     } else {
-        std.debug.print("  Allowed users:", .{});
+        std.debug.print("nullclaw telegram bot starting...\n", .{});
+        std.debug.print("  Provider: {s}\n", .{config.default_provider});
+        std.debug.print("  Model: {s}\n", .{model});
+        std.debug.print("  Temperature: {d:.1}\n", .{temperature});
+    }
+    if (allowed.len == 0) {
+        if (zh) {
+            std.debug.print("  允许用户: （空，所有消息都会被拒绝）\n", .{});
+        } else {
+            std.debug.print("  Allowed users: (none — all messages will be denied)\n", .{});
+        }
+    } else if (allowed.len == 1 and std.mem.eql(u8, allowed[0], "*")) {
+        if (zh) {
+            std.debug.print("  允许用户: *\n", .{});
+        } else {
+            std.debug.print("  Allowed users: *\n", .{});
+        }
+    } else {
+        if (zh) {
+            std.debug.print("  允许用户:", .{});
+        } else {
+            std.debug.print("  Allowed users:", .{});
+        }
         for (allowed) |u| {
             std.debug.print(" {s}", .{u});
         }
@@ -722,7 +1101,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     // Initialize MCP tools from config
     const mcp_tools: ?[]const yc.tools.Tool = if (config.mcp_servers.len > 0)
         yc.mcp.initMcpTools(allocator, config.mcp_servers) catch |err| blk: {
-            std.debug.print("  MCP: init failed: {}\n", .{err});
+            if (zh) {
+                std.debug.print("  MCP: 初始化失败: {}\n", .{err});
+            } else {
+                std.debug.print("  MCP: init failed: {}\n", .{err});
+            }
             break :blk null;
         }
     else
@@ -741,7 +1124,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     defer if (tools.len > 0) allocator.free(tools);
 
     if (mcp_tools) |mt| {
-        std.debug.print("  MCP tools: {d}\n", .{mt.len});
+        if (zh) {
+            std.debug.print("  MCP 工具: {d}\n", .{mt.len});
+        } else {
+            std.debug.print("  MCP tools: {d}\n", .{mt.len});
+        }
     }
 
     // Create optional memory backend (don't fail if unavailable)
@@ -790,8 +1177,13 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .ollama => |*p| p.provider(),
     };
 
-    std.debug.print("  Tools: {d} loaded\n", .{tools.len});
-    std.debug.print("  Memory: {s}\n", .{if (mem_opt != null) "enabled" else "disabled"});
+    if (zh) {
+        std.debug.print("  工具: {d} 个已加载\n", .{tools.len});
+        std.debug.print("  记忆: {s}\n", .{if (mem_opt != null) "已启用" else "已禁用"});
+    } else {
+        std.debug.print("  Tools: {d} loaded\n", .{tools.len});
+        std.debug.print("  Memory: {s}\n", .{if (mem_opt != null) "enabled" else "disabled"});
+    }
 
     // Register bot commands in Telegram's "/" menu
     tg.setMyCommands();
@@ -799,7 +1191,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     // Skip messages accumulated while bot was offline
     tg.dropPendingUpdates();
 
-    std.debug.print("  Polling for messages... (Ctrl+C to stop)\n\n", .{});
+    if (zh) {
+        std.debug.print("  正在轮询消息...（Ctrl+C 停止）\n\n", .{});
+    } else {
+        std.debug.print("  Polling for messages... (Ctrl+C to stop)\n\n", .{});
+    }
 
     var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs);
     defer session_mgr.deinit();
@@ -810,7 +1206,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     // Bot loop: poll → full agent loop (tool calling) → reply
     while (true) {
         const messages = tg.pollUpdates(allocator) catch |err| {
-            std.debug.print("Poll error: {}\n", .{err});
+            if (zh) {
+                std.debug.print("轮询错误: {}\n", .{err});
+            } else {
+                std.debug.print("Poll error: {}\n", .{err});
+            }
             std.Thread.sleep(5 * std.time.ns_per_s);
             continue;
         };
@@ -841,12 +1241,23 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
 
             const reply = session_mgr.processMessage(session_key, msg.content) catch |err| {
                 typing.stop();
-                std.debug.print("  Agent error: {}\n", .{err});
-                const err_msg = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Ошибка сети. Попробуй ещё раз.",
-                    error.MaxToolIterationsExceeded => "Превышен лимит итераций инструментов.",
-                    error.OutOfMemory => "Недостаточно памяти для обработки.",
-                    else => "Произошла ошибка. Попробуй ещё раз или /new для новой сессии.",
+                if (zh) {
+                    std.debug.print("  Agent 错误: {}\n", .{err});
+                } else {
+                    std.debug.print("  Agent error: {}\n", .{err});
+                }
+                const err_msg = if (zh)
+                    switch (err) {
+                        error.CurlFailed, error.CurlReadError, error.CurlWaitError => "网络错误，请稍后重试。",
+                        error.MaxToolIterationsExceeded => "工具迭代次数超过上限。",
+                        error.OutOfMemory => "内存不足，无法处理请求。",
+                        else => "处理失败，请重试或发送 /new 开启新会话。",
+                    }
+                else switch (err) {
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.MaxToolIterationsExceeded => "Tool iteration limit exceeded.",
+                    error.OutOfMemory => "Out of memory while processing the request.",
+                    else => "An error occurred. Try again or use /new for a fresh session.",
                 };
                 tg.sendMessageWithReply(msg.sender, err_msg, reply_to_id) catch |send_err| log.err("failed to send error reply: {}", .{send_err});
                 continue;
@@ -859,7 +1270,11 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
 
             // Reply on telegram; handles [IMAGE:path] markers + split
             tg.sendMessageWithReply(msg.sender, reply, reply_to_id) catch |err| {
-                std.debug.print("  Send error: {}\n", .{err});
+                if (zh) {
+                    std.debug.print("  发送错误: {}\n", .{err});
+                } else {
+                    std.debug.print("  Send error: {}\n", .{err});
+                }
             };
         }
 
@@ -884,7 +1299,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
 }
 
 fn printUsage() void {
-    const usage =
+    const usage_en =
         \\nullclaw -- The smallest AI assistant. Zig-powered.
         \\
         \\USAGE:
@@ -920,7 +1335,47 @@ fn printUsage() void {
         \\  models refresh
         \\
     ;
-    std.debug.print("{s}", .{usage});
+    const usage_zh =
+        \\nullclaw -- 最小可用 AI 助手（Zig 驱动）
+        \\
+        \\用法:
+        \\  nullclaw <命令> [选项]
+        \\
+        \\命令:
+        \\  onboard     初始化工作目录和配置
+        \\  agent       启动 AI Agent 循环
+        \\  gateway     启动网关服务 (HTTP/WebSocket)
+        \\  daemon      启动常驻运行时（网关 + 频道 + 心跳）
+        \\  service     管理系统服务（install/start/stop/status/uninstall）
+        \\  status      查看系统状态
+        \\  doctor      运行诊断
+        \\  cron        管理定时任务
+        \\  channel     管理频道（Telegram、Discord、Slack 等）
+        \\  skills      管理技能
+        \\  hardware    发现并管理硬件
+        \\  migrate     从其他 Agent 运行时迁移数据
+        \\  models      管理模型目录
+        \\  help        显示帮助
+        \\
+        \\选项:
+        \\  onboard [--interactive] [--api-key KEY] [--provider PROV] [--memory MEM]
+        \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP]
+        \\  gateway [--port PORT] [--host HOST]
+        \\  daemon [--port PORT] [--host HOST]
+        \\  service <install|start|stop|status|uninstall>
+        \\  cron <list|add|once|remove|pause|resume> [ARGS]
+        \\  channel <list|start|doctor|add|remove> [ARGS]
+        \\  skills <list|install|remove> [ARGS]
+        \\  hardware <discover|introspect|info> [ARGS]
+        \\  migrate openclaw [--dry-run] [--source PATH]
+        \\  models refresh
+        \\
+    ;
+    if (is_zh_ui()) {
+        std.debug.print("{s}", .{usage_zh});
+    } else {
+        std.debug.print("{s}", .{usage_en});
+    }
 }
 
 test "parse known commands" {

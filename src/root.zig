@@ -10,6 +10,7 @@ pub const json_util = @import("json_util.zig");
 pub const http_util = @import("http_util.zig");
 pub const net_security = @import("net_security.zig");
 pub const websocket = @import("websocket.zig");
+pub const locale = @import("locale.zig");
 
 // Phase 1: Core
 pub const bus = @import("bus.zig");

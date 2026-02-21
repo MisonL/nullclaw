@@ -12,12 +12,17 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const daemon = @import("daemon.zig");
 const cron = @import("cron.zig");
+const locale = @import("locale.zig");
 
 /// Staleness thresholds (seconds).
 const DAEMON_STALE_SECONDS: i64 = 30;
 const SCHEDULER_STALE_SECONDS: i64 = 120;
 const CHANNEL_STALE_SECONDS: i64 = 300;
 const COMMAND_VERSION_PREVIEW_CHARS: usize = 60;
+
+fn is_zh_ui() bool {
+    return locale.detect_ui_language() == .zh_cn;
+}
 
 // ── Diagnostic types ────────────────────────────────────────────
 
@@ -66,22 +71,31 @@ pub fn runDoctor(
     config: *const Config,
     writer: anytype,
 ) !void {
+    const zh = is_zh_ui();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const doctor_alloc = arena.allocator();
+
     var items: std.ArrayList(DiagItem) = .empty;
-    defer items.deinit(allocator);
+    defer items.deinit(doctor_alloc);
 
     // Core checks (matching ZeroClaw)
-    try checkConfigSemantics(allocator, config, &items);
-    try checkWorkspace(allocator, config, &items);
-    try checkDaemonState(allocator, config, &items);
-    try checkEnvironment(allocator, &items);
+    try checkConfigSemantics(doctor_alloc, config, &items);
+    try checkWorkspace(doctor_alloc, config, &items);
+    try checkDaemonState(doctor_alloc, config, &items);
+    try checkEnvironment(doctor_alloc, &items);
 
     // nullclaw-specific extras
-    checkSandbox(allocator, config, &items);
-    try checkCronStatus(allocator, &items);
-    checkChannels(allocator, config, &items);
+    checkSandbox(doctor_alloc, config, &items);
+    try checkCronStatus(doctor_alloc, &items);
+    checkChannels(doctor_alloc, config, &items);
 
     // Print grouped report
-    try writer.writeAll("nullclaw Doctor (enhanced)\n\n");
+    if (zh) {
+        try writer.writeAll("nullclaw 诊断（增强）\n\n");
+    } else {
+        try writer.writeAll("nullclaw Doctor (enhanced)\n\n");
+    }
 
     var current_cat: []const u8 = "";
     var ok_count: u32 = 0;
@@ -101,22 +115,37 @@ pub fn runDoctor(
         }
     }
 
-    try writer.print("\nSummary: {d} ok, {d} warnings, {d} errors\n", .{ ok_count, warn_count, err_count });
+    if (zh) {
+        try writer.print("\n摘要: {d} 正常, {d} 警告, {d} 错误\n", .{ ok_count, warn_count, err_count });
+    } else {
+        try writer.print("\nSummary: {d} ok, {d} warnings, {d} errors\n", .{ ok_count, warn_count, err_count });
+    }
     if (err_count > 0) {
-        try writer.writeAll("Run 'nullclaw doctor --fix' or check your config.\n");
+        if (zh) {
+            try writer.writeAll("可运行 'nullclaw doctor --fix' 或手动检查配置。\n");
+        } else {
+            try writer.writeAll("Run 'nullclaw doctor --fix' or check your config.\n");
+        }
     }
 }
 
 /// Legacy entry point — uses stdout directly.
 pub fn run(allocator: std.mem.Allocator) !void {
+    const zh = is_zh_ui();
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
 
-    if (Config.load(allocator)) |cfg| {
+    if (Config.load(allocator)) |loaded_cfg| {
+        var cfg = loaded_cfg;
+        defer cfg.deinit();
         try runDoctor(allocator, &cfg, stdout);
     } else |_| {
-        try stdout.writeAll("[ERR] No config found -- run `nullclaw onboard` first\n");
+        if (zh) {
+            try stdout.writeAll("[ERR] 未找到配置，请先运行 `nullclaw onboard`\n");
+        } else {
+            try stdout.writeAll("[ERR] No config found -- run `nullclaw onboard` first\n");
+        }
     }
     try stdout.flush();
 }
@@ -495,8 +524,8 @@ pub fn checkEnvironment(
         try items.append(allocator, DiagItem.warn(cat, "curl not found"));
     }
 
-    // $SHELL
-    if (std.process.getEnvVarOwned(allocator, "SHELL")) |shell| {
+    // $SHELL / %COMSPEC%
+    if (getShellPath(allocator)) |shell| {
         defer allocator.free(shell);
         if (shell.len > 0) {
             try items.append(allocator, DiagItem.ok(cat, try std.fmt.allocPrint(allocator, "shell: {s}", .{shell})));
@@ -507,13 +536,54 @@ pub fn checkEnvironment(
         try items.append(allocator, DiagItem.warn(cat, "$SHELL not set"));
     }
 
-    // $HOME
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+    // home directory env (HOME / USERPROFILE / HOMEDRIVE+HOMEPATH)
+    if (resolveHomeDir(allocator)) |home| {
         defer allocator.free(home);
         try items.append(allocator, DiagItem.ok(cat, "home directory env set"));
     } else |_| {
-        try items.append(allocator, DiagItem.err(cat, "$HOME is not set"));
+        try items.append(allocator, DiagItem.err(cat, "home directory env is not set"));
     }
+}
+
+fn getShellPath(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "SHELL")) |shell| {
+        return shell;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    return std.process.getEnvVarOwned(allocator, "COMSPEC");
+}
+
+fn resolveHomeDir(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |home| {
+        return home;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
+    }
+
+    const drive = std.process.getEnvVarOwned(allocator, "HOMEDRIVE") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(drive);
+
+    const path = std.process.getEnvVarOwned(allocator, "HOMEPATH") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => return error.NoHomeDir,
+        else => return err,
+    };
+    defer allocator.free(path);
+
+    return std.fs.path.join(allocator, &.{ drive, path });
 }
 
 fn checkCommandAvailable(allocator: std.mem.Allocator, cmd: []const u8) !?[]const u8 {
@@ -612,7 +682,9 @@ fn checkChannels(allocator: std.mem.Allocator, cfg: *const Config, items: *std.A
 
 /// Check a specific diagnostic (utility for programmatic access).
 pub fn checkConfig(allocator: std.mem.Allocator) DiagResult {
-    if (Config.load(allocator)) |_| {
+    if (Config.load(allocator)) |loaded_cfg| {
+        var cfg = loaded_cfg;
+        defer cfg.deinit();
         return .{ .name = "config", .ok = true, .message = "Config loaded" };
     } else |_| {
         return .{ .name = "config", .ok = false, .message = "No config found" };
@@ -770,8 +842,15 @@ test "checkDaemonState handles missing file" {
     const allocator = arena.allocator();
     var items: std.ArrayList(DiagItem) = .empty;
 
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_path);
+    const cfg_path = try std.fs.path.join(allocator, &.{ tmp_path, "config.json" });
+    defer allocator.free(cfg_path);
+
     var cfg = testConfig();
-    cfg.config_path = "/tmp/nonexistent-nullclaw-test/config.json";
+    cfg.config_path = cfg_path;
 
     try checkDaemonState(allocator, &cfg, &items);
 
@@ -789,21 +868,26 @@ test "checkDaemonState parses valid JSON state" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_path);
+    const state_path = try std.fs.path.join(allocator, &.{ tmp_path, "daemon_state.json" });
+    defer allocator.free(state_path);
+    const cfg_path = try std.fs.path.join(allocator, &.{ tmp_path, "config.json" });
+    defer allocator.free(cfg_path);
+
     const state_content =
         \\{"status": "running", "updated_at": 9999999999, "components": {"scheduler": {"status": "ok"}, "channel:telegram": {"status": "ok"}}}
     ;
-    const state_dir = "/tmp/nullclaw-doctor-test-dir";
-    std.fs.makeDirAbsolute(state_dir) catch {};
-    const state_path = "/tmp/nullclaw-doctor-test-dir/daemon_state.json";
     const file = try std.fs.createFileAbsolute(state_path, .{});
     try file.writeAll(state_content);
     file.close();
-    defer std.fs.deleteFileAbsolute(state_path) catch {};
 
     var items: std.ArrayList(DiagItem) = .empty;
 
     var cfg = testConfig();
-    cfg.config_path = "/tmp/nullclaw-doctor-test-dir/config.json";
+    cfg.config_path = cfg_path;
 
     try checkDaemonState(allocator, &cfg, &items);
 
@@ -838,5 +922,6 @@ fn testConfig() Config {
         .workspace_dir = "/tmp/nullclaw-test-workspace",
         .config_path = "/tmp/nullclaw-test/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
 }

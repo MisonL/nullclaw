@@ -9,6 +9,7 @@
 const std = @import("std");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
+const locale = @import("locale.zig");
 const CronScheduler = @import("cron.zig").CronScheduler;
 const cron = @import("cron.zig");
 const bus_mod = @import("bus.zig");
@@ -17,6 +18,10 @@ const channel_loop = @import("channel_loop.zig");
 const telegram = @import("channels/telegram.zig");
 
 const log = std.log.scoped(.daemon);
+
+fn is_zh_ui() bool {
+    return locale.detect_ui_language() == .zh_cn;
+}
 
 /// How often the daemon state file is flushed (seconds).
 const STATUS_FLUSH_SECONDS: u64 = 5;
@@ -75,11 +80,9 @@ pub const DaemonState = struct {
 
 /// Compute the path to daemon_state.json from config.
 pub fn stateFilePath(allocator: std.mem.Allocator, config: *const Config) ![]u8 {
-    // Use config directory (parent of config_path)
-    if (std.mem.lastIndexOfScalar(u8, config.config_path, '/')) |idx| {
-        return std.fmt.allocPrint(allocator, "{s}/daemon_state.json", .{config.config_path[0..idx]});
-    }
-    return allocator.dupe(u8, "daemon_state.json");
+    // Use config directory (parent of config_path), honoring platform separators.
+    const cfg_dir = std.fs.path.dirname(config.config_path) orelse return allocator.dupe(u8, "daemon_state.json");
+    return std.fs.path.join(allocator, &.{ cfg_dir, "daemon_state.json" });
 }
 
 /// Write daemon state to disk as JSON.
@@ -142,7 +145,7 @@ pub fn isShutdownRequested() bool {
 /// Gateway thread entry point.
 fn gatewayThread(allocator: std.mem.Allocator, host: []const u8, port: u16, state: *DaemonState) void {
     const gateway = @import("gateway.zig");
-    gateway.run(allocator, host, port) catch |err| {
+    gateway.runWithOptions(allocator, host, port, .{ .log_startup = false }) catch |err| {
         state.markError("gateway", @errorName(err));
         health.markComponentError("gateway", @errorName(err));
         return;
@@ -358,6 +361,7 @@ fn spawnTelegramThread(
 /// shutdown is requested (Ctrl+C signal or explicit request).
 /// `host` and `port` are CLI-parsed values that override `config.gateway`.
 pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8, port: u16) !void {
+    const zh = is_zh_ui();
     health.markComponentOk("daemon");
     shutdown_requested.store(false, .release);
 
@@ -383,24 +387,39 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     var stdout_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&stdout_buf);
     const stdout = &bw.interface;
-    try stdout.print("nullclaw daemon started\n", .{});
-    try stdout.print("  Gateway:  http://{s}:{d}\n", .{ state.gateway_host, state.gateway_port });
-    try stdout.print("  Components: {d} active\n", .{state.component_count});
-    try stdout.print("  Ctrl+C to stop\n\n", .{});
+    if (zh) {
+        try stdout.print("nullclaw 守护进程已启动\n", .{});
+        try stdout.print("  网关:      http://{s}:{d}\n", .{ state.gateway_host, state.gateway_port });
+        try stdout.print("  组件:      {d} 个活动\n", .{state.component_count});
+        try stdout.print("  按 Ctrl+C 停止\n\n", .{});
+    } else {
+        try stdout.print("nullclaw daemon started\n", .{});
+        try stdout.print("  Gateway:  http://{s}:{d}\n", .{ state.gateway_host, state.gateway_port });
+        try stdout.print("  Components: {d} active\n", .{state.component_count});
+        try stdout.print("  Ctrl+C to stop\n\n", .{});
+    }
     try stdout.flush();
 
     // Write initial state file
     const state_path = try stateFilePath(allocator, config);
     defer allocator.free(state_path);
     writeStateFile(allocator, state_path, &state) catch |err| {
-        try stdout.print("Warning: could not write state file: {}\n", .{err});
+        if (zh) {
+            try stdout.print("警告: 无法写入状态文件: {}\n", .{err});
+        } else {
+            try stdout.print("Warning: could not write state file: {}\n", .{err});
+        }
     };
 
     // Spawn gateway thread
     state.markRunning("gateway");
     const gw_thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, gatewayThread, .{ allocator, host, port, &state }) catch |err| {
         state.markError("gateway", @errorName(err));
-        try stdout.print("Failed to spawn gateway: {}\n", .{err});
+        if (zh) {
+            try stdout.print("启动网关线程失败: {}\n", .{err});
+        } else {
+            try stdout.print("Failed to spawn gateway: {}\n", .{err});
+        }
         return err;
     };
 
@@ -412,7 +431,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
             hb_thread = thread;
         } else |err| {
             state.markError("heartbeat", @errorName(err));
-            stdout.print("Warning: heartbeat thread failed: {}\n", .{err}) catch {};
+            if (zh) {
+                stdout.print("警告: 心跳线程失败: {}\n", .{err}) catch {};
+            } else {
+                stdout.print("Warning: heartbeat thread failed: {}\n", .{err}) catch {};
+            }
         }
     }
 
@@ -427,7 +450,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
             sched_thread = thread;
         } else |err| {
             state.markError("scheduler", @errorName(err));
-            stdout.print("Warning: scheduler thread failed: {}\n", .{err}) catch {};
+            if (zh) {
+                stdout.print("警告: 调度线程失败: {}\n", .{err}) catch {};
+            } else {
+                stdout.print("Warning: scheduler thread failed: {}\n", .{err}) catch {};
+            }
         }
     }
 
@@ -439,7 +466,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     var channel_rt: ?*channel_loop.ChannelRuntime = null;
     if (hasSupervisedChannels(config)) {
         channel_rt = channel_loop.ChannelRuntime.init(allocator, config) catch |err| blk: {
-            stdout.print("Warning: channel runtime init failed: {}\n", .{err}) catch {};
+            if (zh) {
+                stdout.print("警告: 频道运行时初始化失败: {}\n", .{err}) catch {};
+            } else {
+                stdout.print("Warning: channel runtime init failed: {}\n", .{err}) catch {};
+            }
             state.markError("channels", @errorName(err));
             break :blk null;
         };
@@ -455,7 +486,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
             chan_thread = thread;
         } else |err| {
             state.markError("channels", @errorName(err));
-            stdout.print("Warning: channel supervisor thread failed: {}\n", .{err}) catch {};
+            if (zh) {
+                stdout.print("警告: 频道监督线程失败: {}\n", .{err}) catch {};
+            } else {
+                stdout.print("Warning: channel supervisor thread failed: {}\n", .{err}) catch {};
+            }
         }
     }
     var dispatch_stats = dispatch.DispatchStats{};
@@ -471,7 +506,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         health.markComponentOk("outbound_dispatcher");
     } else |err| {
         state.markError("outbound_dispatcher", @errorName(err));
-        stdout.print("Warning: outbound dispatcher thread failed: {}\n", .{err}) catch {};
+        if (zh) {
+            stdout.print("警告: 出站分发线程失败: {}\n", .{err}) catch {};
+        } else {
+            stdout.print("Warning: outbound dispatcher thread failed: {}\n", .{err}) catch {};
+        }
     }
 
     // Main thread: wait for shutdown signal (poll-based)
@@ -479,7 +518,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         std.Thread.sleep(1 * std.time.ns_per_s);
     }
 
-    try stdout.print("\nShutting down...\n", .{});
+    if (zh) {
+        try stdout.print("\n正在关闭...\n", .{});
+    } else {
+        try stdout.print("\nShutting down...\n", .{});
+    }
 
     // Close bus to signal dispatcher to exit
     event_bus.close();
@@ -495,7 +538,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     if (hb_thread) |t| t.join();
     gw_thread.join();
 
-    try stdout.print("nullclaw daemon stopped.\n", .{});
+    if (zh) {
+        try stdout.print("nullclaw 守护进程已停止。\n", .{});
+    } else {
+        try stdout.print("nullclaw daemon stopped.\n", .{});
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -537,19 +584,30 @@ test "hasSupervisedChannels false for defaults" {
         .workspace_dir = "/tmp",
         .config_path = "/tmp/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     try std.testing.expect(!hasSupervisedChannels(&config));
 }
 
 test "stateFilePath derives from config_path" {
+    const config_path = if (@import("builtin").os.tag == .windows)
+        "C:\\Users\\test\\.nullclaw\\config.json"
+    else
+        "/home/user/.nullclaw/config.json";
+
     const config = Config{
         .workspace_dir = "/tmp/workspace",
-        .config_path = "/home/user/.nullclaw/config.json",
+        .config_path = config_path,
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     const path = try stateFilePath(std.testing.allocator, &config);
     defer std.testing.allocator.free(path);
-    try std.testing.expectEqualStrings("/home/user/.nullclaw/daemon_state.json", path);
+
+    const parent = std.fs.path.dirname(config_path).?;
+    const expected = try std.fs.path.join(std.testing.allocator, &.{ parent, "daemon_state.json" });
+    defer std.testing.allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, path);
 }
 
 test "scheduler backoff constants" {
@@ -586,6 +644,7 @@ test "channelSupervisorThread respects shutdown" {
         .workspace_dir = "/tmp",
         .config_path = "/tmp/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
 
     var state = DaemonState{};
@@ -622,8 +681,14 @@ test "writeStateFile produces valid content" {
     };
     state.addComponent("test-comp");
 
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(tmp_path);
+    const path = try std.fs.path.join(std.testing.allocator, &.{ tmp_path, "nullclaw-test-daemon-state.json" });
+    defer std.testing.allocator.free(path);
+
     // Write to a temp path
-    const path = "/tmp/nullclaw-test-daemon-state.json";
     try writeStateFile(std.testing.allocator, path, &state);
 
     // Read back and verify
@@ -635,7 +700,4 @@ test "writeStateFile produces valid content" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"status\": \"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "test-comp") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "127.0.0.1:8080") != null);
-
-    // Cleanup
-    std.fs.deleteFileAbsolute(path) catch {};
 }
