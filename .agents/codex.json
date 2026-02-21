@@ -1,0 +1,251 @@
+{
+  "version": "2.0.1",
+  "updatedAt": "2026-02-20T11:21:11.947Z",
+  "skills": [
+    {
+      "id": "api-patterns",
+      "originalName": "api-patterns",
+      "path": "skills/api-patterns/SKILL.md"
+    },
+    {
+      "id": "app-builder",
+      "originalName": "app-builder",
+      "path": "skills/app-builder/SKILL.md"
+    },
+    {
+      "id": "architecture",
+      "originalName": "architecture",
+      "path": "skills/architecture/SKILL.md"
+    },
+    {
+      "id": "bash-linux",
+      "originalName": "bash-linux",
+      "path": "skills/bash-linux/SKILL.md"
+    },
+    {
+      "id": "behavioral-modes",
+      "originalName": "behavioral-modes",
+      "path": "skills/behavioral-modes/SKILL.md"
+    },
+    {
+      "id": "brainstorming",
+      "originalName": "brainstorming",
+      "path": "skills/brainstorming/SKILL.md"
+    },
+    {
+      "id": "clean-code",
+      "originalName": "clean-code",
+      "path": "skills/clean-code/SKILL.md"
+    },
+    {
+      "id": "code-review-checklist",
+      "originalName": "code-review-checklist",
+      "path": "skills/code-review-checklist/SKILL.md"
+    },
+    {
+      "id": "database-design",
+      "originalName": "database-design",
+      "path": "skills/database-design/SKILL.md"
+    },
+    {
+      "id": "deployment-procedures",
+      "originalName": "deployment-procedures",
+      "path": "skills/deployment-procedures/SKILL.md"
+    },
+    {
+      "id": "documentation-templates",
+      "originalName": "documentation-templates",
+      "path": "skills/documentation-templates/SKILL.md"
+    },
+    {
+      "id": "frontend-design",
+      "originalName": "frontend-design",
+      "path": "skills/frontend-design/SKILL.md"
+    },
+    {
+      "id": "game-development",
+      "originalName": "game-development",
+      "path": "skills/game-development/SKILL.md"
+    },
+    {
+      "id": "geo-fundamentals",
+      "originalName": "geo-fundamentals",
+      "path": "skills/geo-fundamentals/SKILL.md"
+    },
+    {
+      "id": "i18n-localization",
+      "originalName": "i18n-localization",
+      "path": "skills/i18n-localization/SKILL.md"
+    },
+    {
+      "id": "intelligent-routing",
+      "originalName": "intelligent-routing",
+      "path": "skills/intelligent-routing/SKILL.md"
+    },
+    {
+      "id": "lint-and-validate",
+      "originalName": "lint-and-validate",
+      "path": "skills/lint-and-validate/SKILL.md"
+    },
+    {
+      "id": "mcp-builder",
+      "originalName": "mcp-builder",
+      "path": "skills/mcp-builder/SKILL.md"
+    },
+    {
+      "id": "mobile-design",
+      "originalName": "mobile-design",
+      "path": "skills/mobile-design/SKILL.md"
+    },
+    {
+      "id": "nextjs-react-expert",
+      "originalName": "nextjs-react-expert",
+      "path": "skills/nextjs-react-expert/SKILL.md"
+    },
+    {
+      "id": "nodejs-best-practices",
+      "originalName": "nodejs-best-practices",
+      "path": "skills/nodejs-best-practices/SKILL.md"
+    },
+    {
+      "id": "parallel-agents",
+      "originalName": "parallel-agents",
+      "path": "skills/parallel-agents/SKILL.md"
+    },
+    {
+      "id": "performance-profiling",
+      "originalName": "performance-profiling",
+      "path": "skills/performance-profiling/SKILL.md"
+    },
+    {
+      "id": "plan-writing",
+      "originalName": "plan-writing",
+      "path": "skills/plan-writing/SKILL.md"
+    },
+    {
+      "id": "powershell-windows",
+      "originalName": "powershell-windows",
+      "path": "skills/powershell-windows/SKILL.md"
+    },
+    {
+      "id": "python-patterns",
+      "originalName": "python-patterns",
+      "path": "skills/python-patterns/SKILL.md"
+    },
+    {
+      "id": "red-team-tactics",
+      "originalName": "red-team-tactics",
+      "path": "skills/red-team-tactics/SKILL.md"
+    },
+    {
+      "id": "rust-pro",
+      "originalName": "rust-pro",
+      "path": "skills/rust-pro/SKILL.md"
+    },
+    {
+      "id": "seo-fundamentals",
+      "originalName": "seo-fundamentals",
+      "path": "skills/seo-fundamentals/SKILL.md"
+    },
+    {
+      "id": "server-management",
+      "originalName": "server-management",
+      "path": "skills/server-management/SKILL.md"
+    },
+    {
+      "id": "systematic-debugging",
+      "originalName": "systematic-debugging",
+      "path": "skills/systematic-debugging/SKILL.md"
+    },
+    {
+      "id": "tailwind-patterns",
+      "originalName": "tailwind-patterns",
+      "path": "skills/tailwind-patterns/SKILL.md"
+    },
+    {
+      "id": "tdd-workflow",
+      "originalName": "tdd-workflow",
+      "path": "skills/tdd-workflow/SKILL.md"
+    },
+    {
+      "id": "testing-patterns",
+      "originalName": "testing-patterns",
+      "path": "skills/testing-patterns/SKILL.md"
+    },
+    {
+      "id": "vulnerability-scanner",
+      "originalName": "vulnerability-scanner",
+      "path": "skills/vulnerability-scanner/SKILL.md"
+    },
+    {
+      "id": "web-design-guidelines",
+      "originalName": "web-design-guidelines",
+      "path": "skills/web-design-guidelines/SKILL.md"
+    },
+    {
+      "id": "webapp-testing",
+      "originalName": "webapp-testing",
+      "path": "skills/webapp-testing/SKILL.md"
+    },
+    {
+      "id": "workflow-brainstorm",
+      "originalName": "brainstorm",
+      "path": "skills/workflow-brainstorm/SKILL.md"
+    },
+    {
+      "id": "workflow-create",
+      "originalName": "create",
+      "path": "skills/workflow-create/SKILL.md"
+    },
+    {
+      "id": "workflow-debug",
+      "originalName": "debug",
+      "path": "skills/workflow-debug/SKILL.md"
+    },
+    {
+      "id": "workflow-deploy",
+      "originalName": "deploy",
+      "path": "skills/workflow-deploy/SKILL.md"
+    },
+    {
+      "id": "workflow-enhance",
+      "originalName": "enhance",
+      "path": "skills/workflow-enhance/SKILL.md"
+    },
+    {
+      "id": "workflow-orchestrate",
+      "originalName": "orchestrate",
+      "path": "skills/workflow-orchestrate/SKILL.md"
+    },
+    {
+      "id": "workflow-plan",
+      "originalName": "plan",
+      "path": "skills/workflow-plan/SKILL.md"
+    },
+    {
+      "id": "workflow-preview",
+      "originalName": "preview",
+      "path": "skills/workflow-preview/SKILL.md"
+    },
+    {
+      "id": "workflow-restore-localize-compat",
+      "originalName": "restore-localize-compat",
+      "path": "skills/workflow-restore-localize-compat/SKILL.md"
+    },
+    {
+      "id": "workflow-status",
+      "originalName": "status",
+      "path": "skills/workflow-status/SKILL.md"
+    },
+    {
+      "id": "workflow-test",
+      "originalName": "test",
+      "path": "skills/workflow-test/SKILL.md"
+    },
+    {
+      "id": "workflow-ui-ux-pro-max",
+      "originalName": "ui-ux-pro-max",
+      "path": "skills/workflow-ui-ux-pro-max/SKILL.md"
+    }
+  ]
+}

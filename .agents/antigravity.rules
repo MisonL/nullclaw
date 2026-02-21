@@ -1,0 +1,11 @@
+# Antigravity Risk Controls (Codex Managed)
+
+version: 2.0.1
+generated_at: 2026-02-20T11:21:11.947Z
+
+## Controls
+- Managed skills are stored under `.agents/skills`.
+- Keep generated skill IDs stable to avoid selector drift.
+- If integrity checks fail, run `ag-kit doctor --target codex --fix`.
+- Before destructive updates, preserve manual edits in source control.
+

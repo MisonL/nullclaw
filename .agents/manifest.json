@@ -1,0 +1,596 @@
+{
+  "version": 2,
+  "target": "codex",
+  "kitVersion": "2.0.1",
+  "updatedAt": "2026-02-20T11:21:12.011Z",
+  "files": {
+    "AGENTS.md": {
+      "hash": "d5f6b04a26cd55e5834d84d601e8b714cb853424c42b249e07c3ff82a73357d5",
+      "source": "bundled:compiled/AGENTS.md"
+    },
+    "antigravity.rules": {
+      "hash": "a4deecc61b3f7ec815a812ee72891a6632b67503208722071d7fae388e80c72c",
+      "source": "bundled:compiled/antigravity.rules"
+    },
+    "codex.json": {
+      "hash": "19ed52b93b3a6fc644ad22095ed8f9f19b8ddafd974d18688f35b90fbe5aae10",
+      "source": "bundled:compiled/codex.json"
+    },
+    "skills/api-patterns/api-style.md": {
+      "hash": "2bdce38ae9a87b6e0ebdb60494e08719d5a558d37a37fc6af5bad8e718a4ca41",
+      "source": "bundled:compiled/skills/api-patterns/api-style.md"
+    },
+    "skills/api-patterns/auth.md": {
+      "hash": "83dfc6cc4555c503c7966fcf16df7d5169d5e18ea701338e49c112e6082505f5",
+      "source": "bundled:compiled/skills/api-patterns/auth.md"
+    },
+    "skills/api-patterns/documentation.md": {
+      "hash": "250fba7bd44f4c07326d5938841be6bf484b43eb434ffbad5870c0e4b86b1973",
+      "source": "bundled:compiled/skills/api-patterns/documentation.md"
+    },
+    "skills/api-patterns/graphql.md": {
+      "hash": "e400c1ee663ac8fba622545c0ab0bebd1a1f1c35877ab087281bdb6389d6b41f",
+      "source": "bundled:compiled/skills/api-patterns/graphql.md"
+    },
+    "skills/api-patterns/rate-limiting.md": {
+      "hash": "72ff60843b6d225e15fcf6454899715c964a13e0c844c703ea5614d4efb6d991",
+      "source": "bundled:compiled/skills/api-patterns/rate-limiting.md"
+    },
+    "skills/api-patterns/response.md": {
+      "hash": "ed177df7bd5dfc424678549a1414c97476791a1abdb6a28f7ca39136c68a7c4b",
+      "source": "bundled:compiled/skills/api-patterns/response.md"
+    },
+    "skills/api-patterns/rest.md": {
+      "hash": "5cbd9c89a5f1fcdd1e9f8e775e6814301a6a0271b41e9da32b0ad9cb676b653b",
+      "source": "bundled:compiled/skills/api-patterns/rest.md"
+    },
+    "skills/api-patterns/scripts/api_validator.py": {
+      "hash": "0c633f13a560ba75556e434eb87adbd37d4c1b98ff6eb9b9ca36a2df5b192852",
+      "source": "bundled:compiled/skills/api-patterns/scripts/api_validator.py"
+    },
+    "skills/api-patterns/security-testing.md": {
+      "hash": "d3cc7426ec37388ac6cbaf328e9c15d84755f5c4fc52984422cd06820d56363d",
+      "source": "bundled:compiled/skills/api-patterns/security-testing.md"
+    },
+    "skills/api-patterns/SKILL.md": {
+      "hash": "5e946bd7986113506239ec083670f8da51de0c74bda8bb97219eb26115c6586f",
+      "source": "bundled:compiled/skills/api-patterns/SKILL.md"
+    },
+    "skills/api-patterns/trpc.md": {
+      "hash": "718575a45da6159c9755876962e1c02bab6896e5c6800b305cdc44a282427ae1",
+      "source": "bundled:compiled/skills/api-patterns/trpc.md"
+    },
+    "skills/api-patterns/versioning.md": {
+      "hash": "c1570c77cf2d3c782034b35d07562d0155274817b335d93e45217760d345b093",
+      "source": "bundled:compiled/skills/api-patterns/versioning.md"
+    },
+    "skills/app-builder/agent-coordination.md": {
+      "hash": "5bfac09653b0ed0e84e41a4020ca17a4d9358ab71e9d816168248230420890e9",
+      "source": "bundled:compiled/skills/app-builder/agent-coordination.md"
+    },
+    "skills/app-builder/feature-building.md": {
+      "hash": "5ac53c095630ae826e2c6d0d89f1178f1553c6ae79eedade084b7b71428dc089",
+      "source": "bundled:compiled/skills/app-builder/feature-building.md"
+    },
+    "skills/app-builder/project-detection.md": {
+      "hash": "37c41cb210252b211dfc2232228a50980f7fda082765ffec5f265d7623b13ae0",
+      "source": "bundled:compiled/skills/app-builder/project-detection.md"
+    },
+    "skills/app-builder/scaffolding.md": {
+      "hash": "3d19b52ecab26e04db9f962ab043ea5751abb8732952e4db781a0710fc9f8d13",
+      "source": "bundled:compiled/skills/app-builder/scaffolding.md"
+    },
+    "skills/app-builder/SKILL.md": {
+      "hash": "c2a05433e38385a5e2aa8f11bf1f82782eb253faf3d8e9544183440a5a78dbaf",
+      "source": "bundled:compiled/skills/app-builder/SKILL.md"
+    },
+    "skills/app-builder/tech-stack.md": {
+      "hash": "e2876bd5118aad3e1d028bd469bc59ef404ddeb53cf3c878025d989d7c8ab192",
+      "source": "bundled:compiled/skills/app-builder/tech-stack.md"
+    },
+    "skills/app-builder/templates/astro-static/TEMPLATE.md": {
+      "hash": "aff251f7e167030659d722c53f341b5ce740971e293db41e67c17ce6391bc85b",
+      "source": "bundled:compiled/skills/app-builder/templates/astro-static/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/chrome-extension/TEMPLATE.md": {
+      "hash": "6d1a82b22748869b74e6cb6665f8d0f855c1de6e68adf993cd12088bb1c6ff3f",
+      "source": "bundled:compiled/skills/app-builder/templates/chrome-extension/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/cli-tool/TEMPLATE.md": {
+      "hash": "88c01ccc5991753cd4cb1e347dcd0d84b30e89d6c8351b0432b9ff9046116c75",
+      "source": "bundled:compiled/skills/app-builder/templates/cli-tool/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/electron-desktop/TEMPLATE.md": {
+      "hash": "d7c3920c49d9ed72d8ed675b5c5e685916d5a2f7d545f3b9cc07c2ac82948ede",
+      "source": "bundled:compiled/skills/app-builder/templates/electron-desktop/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/express-api/TEMPLATE.md": {
+      "hash": "69e380a2ab3090edda41c949a262c7d64f0f09fe02405dd38f92908d478bbfd2",
+      "source": "bundled:compiled/skills/app-builder/templates/express-api/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/flutter-app/TEMPLATE.md": {
+      "hash": "1c880751ce27165aaf1f47fcd52dfa970557af168b66e805e7a8102356b1a835",
+      "source": "bundled:compiled/skills/app-builder/templates/flutter-app/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/monorepo-turborepo/TEMPLATE.md": {
+      "hash": "2167406336bb2fe5ff6b4f25ffa772a0347615f3243a60f28779c4f43976b15d",
+      "source": "bundled:compiled/skills/app-builder/templates/monorepo-turborepo/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/nextjs-fullstack/TEMPLATE.md": {
+      "hash": "a52024fd78c2d4d6c3af94fe2d89e6e82400b672d446739d011a4a9422f618f8",
+      "source": "bundled:compiled/skills/app-builder/templates/nextjs-fullstack/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/nextjs-saas/TEMPLATE.md": {
+      "hash": "82e773dc72aba009ef005220b765428baa05529b4ee47b308623e1155c2f3f62",
+      "source": "bundled:compiled/skills/app-builder/templates/nextjs-saas/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/nextjs-static/TEMPLATE.md": {
+      "hash": "cf51468de15a7282fc81d8e867c7e11fbb67d8a4e7bfd8ad20f2ad0c85e6b02b",
+      "source": "bundled:compiled/skills/app-builder/templates/nextjs-static/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/nuxt-app/TEMPLATE.md": {
+      "hash": "4b452837dc0e30b4b3bd075f9caf5dca31f9dada10986a788e9a0def772f3622",
+      "source": "bundled:compiled/skills/app-builder/templates/nuxt-app/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/python-fastapi/TEMPLATE.md": {
+      "hash": "695fe9a262a448fc0e40a0f79bc814ebbc93fe467ee0eb62857f084696948f42",
+      "source": "bundled:compiled/skills/app-builder/templates/python-fastapi/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/react-native-app/TEMPLATE.md": {
+      "hash": "b87d0652f3f20fc8a0fdbe0db6918349648429d995de2c73d017027ae985f88f",
+      "source": "bundled:compiled/skills/app-builder/templates/react-native-app/TEMPLATE.md"
+    },
+    "skills/app-builder/templates/SKILL.md": {
+      "hash": "b82b19d8179d3bdcfbb08f320a4558bb38ccb4ab3f86589822e7a6eb943651ef",
+      "source": "bundled:compiled/skills/app-builder/templates/SKILL.md"
+    },
+    "skills/architecture/context-discovery.md": {
+      "hash": "5b70cdf2935ba6578f0c9f78461d478e7bd4005161b28352b693f98b044fc7c9",
+      "source": "bundled:compiled/skills/architecture/context-discovery.md"
+    },
+    "skills/architecture/examples.md": {
+      "hash": "23543ba2c0c5cb674179917947cbc8ba0c28427dec42137d0e4568dbb4fa9492",
+      "source": "bundled:compiled/skills/architecture/examples.md"
+    },
+    "skills/architecture/pattern-selection.md": {
+      "hash": "aa6a32279f00a7d7bada4c1d58c10d125689f84794ba45daeb32f5a42a0a380d",
+      "source": "bundled:compiled/skills/architecture/pattern-selection.md"
+    },
+    "skills/architecture/patterns-reference.md": {
+      "hash": "73d4bd64752c16394488cad1074ad7254c257cccfa7841379ad8fdc128d81e41",
+      "source": "bundled:compiled/skills/architecture/patterns-reference.md"
+    },
+    "skills/architecture/SKILL.md": {
+      "hash": "0881d1136c079c5884c7f4f8f1cc1bd175403b733a5643d2ab613911cc1cf664",
+      "source": "bundled:compiled/skills/architecture/SKILL.md"
+    },
+    "skills/architecture/trade-off-analysis.md": {
+      "hash": "636719151ff63cfe1ed0c07242388d5d4b980757fb84bdca9202774e6dd50210",
+      "source": "bundled:compiled/skills/architecture/trade-off-analysis.md"
+    },
+    "skills/bash-linux/SKILL.md": {
+      "hash": "32929387b9e264e9dc1acda8d7060e1e389405168f9784c1d59c413d27af5fb8",
+      "source": "bundled:compiled/skills/bash-linux/SKILL.md"
+    },
+    "skills/behavioral-modes/SKILL.md": {
+      "hash": "0d042302cf63cc5e131206ef63e0022d1cad61f08ebe7231b6eef4735e74b281",
+      "source": "bundled:compiled/skills/behavioral-modes/SKILL.md"
+    },
+    "skills/brainstorming/dynamic-questioning.md": {
+      "hash": "a898b1c2bb3514055cc127a0d7bbc34bd9b69bd127940fef130f70545a85fa9f",
+      "source": "bundled:compiled/skills/brainstorming/dynamic-questioning.md"
+    },
+    "skills/brainstorming/SKILL.md": {
+      "hash": "e428984d2925f9cef9735896f590e2203f74036bc8cb9021749b789ed82158c1",
+      "source": "bundled:compiled/skills/brainstorming/SKILL.md"
+    },
+    "skills/clean-code/SKILL.md": {
+      "hash": "0e2233afda4d492a5f4f36f2c7cee7a273bb04636decd2633293b4f362b6d392",
+      "source": "bundled:compiled/skills/clean-code/SKILL.md"
+    },
+    "skills/code-review-checklist/SKILL.md": {
+      "hash": "387c94df913c8a96dab07b5af2e53360f1b05b8c528bce51c29e5d34633ddf0f",
+      "source": "bundled:compiled/skills/code-review-checklist/SKILL.md"
+    },
+    "skills/database-design/database-selection.md": {
+      "hash": "6fbc5f59e27e8e7b2055d85f1ef7cf5b218e59809de67e0200234db5f0eb686f",
+      "source": "bundled:compiled/skills/database-design/database-selection.md"
+    },
+    "skills/database-design/indexing.md": {
+      "hash": "128eef70474f31b1af3553191bc64b2421aed8d987cd3b8e2c2291d5efb9dd98",
+      "source": "bundled:compiled/skills/database-design/indexing.md"
+    },
+    "skills/database-design/migrations.md": {
+      "hash": "d04ddf73be1823b6e002d01df4f48d0d6dc61dcff3f3f47984829949d93a4d25",
+      "source": "bundled:compiled/skills/database-design/migrations.md"
+    },
+    "skills/database-design/optimization.md": {
+      "hash": "e7c0e24aebe61557d08dfa4813dc249848d2fc9b4eb5490766c326b134b8682a",
+      "source": "bundled:compiled/skills/database-design/optimization.md"
+    },
+    "skills/database-design/orm-selection.md": {
+      "hash": "5946c3bdbe14e1af02df5ae157ac00acf5d8adb0308de05782b28bffef9b0904",
+      "source": "bundled:compiled/skills/database-design/orm-selection.md"
+    },
+    "skills/database-design/schema-design.md": {
+      "hash": "d9af8b47070b0a5503be348d733a1a36fcfa13e79259bf4bfd6ee69bfe487980",
+      "source": "bundled:compiled/skills/database-design/schema-design.md"
+    },
+    "skills/database-design/scripts/schema_validator.py": {
+      "hash": "30002411da4b6b82471d7e33ac3906daec72e69fab0fd29dd8c201b6a5777748",
+      "source": "bundled:compiled/skills/database-design/scripts/schema_validator.py"
+    },
+    "skills/database-design/SKILL.md": {
+      "hash": "cdaf4d757cdb5127db68019999e3bee15a51cd71961796afdfc500c59c0129f7",
+      "source": "bundled:compiled/skills/database-design/SKILL.md"
+    },
+    "skills/deployment-procedures/SKILL.md": {
+      "hash": "bb5c057b12838f069200f8a1a7c362ca5ceaef3a1393fdefbed1a727bf56abcb",
+      "source": "bundled:compiled/skills/deployment-procedures/SKILL.md"
+    },
+    "skills/documentation-templates/SKILL.md": {
+      "hash": "8b8b03a46adecb25054360d68886d10ebbb86ad0709a42a93303c60fe426ec88",
+      "source": "bundled:compiled/skills/documentation-templates/SKILL.md"
+    },
+    "skills/frontend-design/animation-guide.md": {
+      "hash": "0ed37ca143416b3f53a4160f555727363acc311ac11590955f0a4a8e652e2421",
+      "source": "bundled:compiled/skills/frontend-design/animation-guide.md"
+    },
+    "skills/frontend-design/color-system.md": {
+      "hash": "786708779bc30352f73c9c47bc62ce74feab286eb02ba8ebfc38b81e82652e93",
+      "source": "bundled:compiled/skills/frontend-design/color-system.md"
+    },
+    "skills/frontend-design/decision-trees.md": {
+      "hash": "d47434c8851605d9690a60c903462539c0605d42d96f3ceadfe56b05bf22dd17",
+      "source": "bundled:compiled/skills/frontend-design/decision-trees.md"
+    },
+    "skills/frontend-design/motion-graphics.md": {
+      "hash": "97ee583b600b49f87df4d81a959785dd0d98fbee5bd36b4c5f6f9fbc7670f6b1",
+      "source": "bundled:compiled/skills/frontend-design/motion-graphics.md"
+    },
+    "skills/frontend-design/scripts/accessibility_checker.py": {
+      "hash": "07de15cb02bfbddb87e405fd8e73b43a2da7b82c4ad8800aecc2d71a9813efc3",
+      "source": "bundled:compiled/skills/frontend-design/scripts/accessibility_checker.py"
+    },
+    "skills/frontend-design/scripts/ux_audit.py": {
+      "hash": "c502e52e258a7bc3b503b1eb34fa82daeadf38cf71f09a812c0a198b98d0533c",
+      "source": "bundled:compiled/skills/frontend-design/scripts/ux_audit.py"
+    },
+    "skills/frontend-design/SKILL.md": {
+      "hash": "dfa4d589d7d984c8a9fb5e6cfa486355785b9f102d8934460070ba24f3f7d6d5",
+      "source": "bundled:compiled/skills/frontend-design/SKILL.md"
+    },
+    "skills/frontend-design/typography-system.md": {
+      "hash": "27c0dc75f795e8af26e58c72427eeb94250aedbc8336514d3bdc509b04b28705",
+      "source": "bundled:compiled/skills/frontend-design/typography-system.md"
+    },
+    "skills/frontend-design/ux-psychology.md": {
+      "hash": "45215e0b1abc8a38d4327ff192d18fa0a761b1aa9e58b5ed1c381097326d91b4",
+      "source": "bundled:compiled/skills/frontend-design/ux-psychology.md"
+    },
+    "skills/frontend-design/visual-effects.md": {
+      "hash": "83e2bf4cedf254ac40f39f5a681ba64ff8e55a2ad61e549fd3a64c6d19090447",
+      "source": "bundled:compiled/skills/frontend-design/visual-effects.md"
+    },
+    "skills/game-development/2d-games/SKILL.md": {
+      "hash": "fc92848c5c3cfd98c7946ac643e490de6b5a03842f70a9c965c3cddbc611aab9",
+      "source": "bundled:compiled/skills/game-development/2d-games/SKILL.md"
+    },
+    "skills/game-development/3d-games/SKILL.md": {
+      "hash": "c09cb84251b784ecf8ca43902277cf79a7c8c90f42da51ef135d912511a67466",
+      "source": "bundled:compiled/skills/game-development/3d-games/SKILL.md"
+    },
+    "skills/game-development/game-art/SKILL.md": {
+      "hash": "5f4411e980eb10db9e56eb42cd3e877aa7eaebd3eb7b750e3efaf1673252a0e4",
+      "source": "bundled:compiled/skills/game-development/game-art/SKILL.md"
+    },
+    "skills/game-development/game-audio/SKILL.md": {
+      "hash": "65d43a0d39e68547bca5d854d2de15a9762ed4eda2ddce441152c1966f453bd1",
+      "source": "bundled:compiled/skills/game-development/game-audio/SKILL.md"
+    },
+    "skills/game-development/game-design/SKILL.md": {
+      "hash": "3512dcc9e4121ab2dac41cb12766c8dea6d03e0c9be674e13b681704f1324188",
+      "source": "bundled:compiled/skills/game-development/game-design/SKILL.md"
+    },
+    "skills/game-development/mobile-games/SKILL.md": {
+      "hash": "c6d14ac33485366ca6bda4cb10b2592ff33c57cf13d2c4f43267f7ae0288bbb8",
+      "source": "bundled:compiled/skills/game-development/mobile-games/SKILL.md"
+    },
+    "skills/game-development/multiplayer/SKILL.md": {
+      "hash": "5c3d5247046e0a650e7dfd78886859ee69f76886db294999498f90b097dbe475",
+      "source": "bundled:compiled/skills/game-development/multiplayer/SKILL.md"
+    },
+    "skills/game-development/pc-games/SKILL.md": {
+      "hash": "5cadeb80bddab74e08efb617f891d5de99591d44268f6fd7d296ae382fa429de",
+      "source": "bundled:compiled/skills/game-development/pc-games/SKILL.md"
+    },
+    "skills/game-development/SKILL.md": {
+      "hash": "82f3140581fcbad468e8ee925ce60cdfd6046fd6dabf3ba5b933604e5b71114d",
+      "source": "bundled:compiled/skills/game-development/SKILL.md"
+    },
+    "skills/game-development/vr-ar/SKILL.md": {
+      "hash": "44631304cb281de277700e4e7e4f576e4e5f10f5c82ebfae23514d2dd5fef83f",
+      "source": "bundled:compiled/skills/game-development/vr-ar/SKILL.md"
+    },
+    "skills/game-development/web-games/SKILL.md": {
+      "hash": "a13fa7b6dea2083264e139ec4227bdfe123d6fb85892a3b46e6ec8301bae6611",
+      "source": "bundled:compiled/skills/game-development/web-games/SKILL.md"
+    },
+    "skills/geo-fundamentals/scripts/geo_checker.py": {
+      "hash": "512cf855e5ab3441e2db4578a3c3a51baf3c34461a1735d02dfb079a73fb2522",
+      "source": "bundled:compiled/skills/geo-fundamentals/scripts/geo_checker.py"
+    },
+    "skills/geo-fundamentals/SKILL.md": {
+      "hash": "a57446fddc97f85737e4e3ab7eb6313180d8e0ab48443ef17b8214938115cde8",
+      "source": "bundled:compiled/skills/geo-fundamentals/SKILL.md"
+    },
+    "skills/i18n-localization/scripts/i18n_checker.py": {
+      "hash": "a90946f9ffee5fc83b1dbdbd001616eceb299101bf255efaec4601cecf210379",
+      "source": "bundled:compiled/skills/i18n-localization/scripts/i18n_checker.py"
+    },
+    "skills/i18n-localization/SKILL.md": {
+      "hash": "daf1ac1f9197bed062ab90948a56fbb9e4640b0e7a329f56908a1d3248b13044",
+      "source": "bundled:compiled/skills/i18n-localization/SKILL.md"
+    },
+    "skills/intelligent-routing/SKILL.md": {
+      "hash": "e149d803d17801b371454e292d511e0caf30806d7888fae5046b076da79a4a37",
+      "source": "bundled:compiled/skills/intelligent-routing/SKILL.md"
+    },
+    "skills/lint-and-validate/scripts/lint_runner.py": {
+      "hash": "822c8185ad1df47fdbea2cafaa7141c5477e4c8227ee059749db80816cd1c486",
+      "source": "bundled:compiled/skills/lint-and-validate/scripts/lint_runner.py"
+    },
+    "skills/lint-and-validate/scripts/type_coverage.py": {
+      "hash": "e654d5eeae187976700da0739b4e62f35e2829d3c61b88cd08da19b99eb164f9",
+      "source": "bundled:compiled/skills/lint-and-validate/scripts/type_coverage.py"
+    },
+    "skills/lint-and-validate/SKILL.md": {
+      "hash": "20f0b7abd95c77d4ef31f391de5470583ec9c244a647ebd8a97e69a097556564",
+      "source": "bundled:compiled/skills/lint-and-validate/SKILL.md"
+    },
+    "skills/mcp-builder/SKILL.md": {
+      "hash": "77ccd3b5264fcb1f4907890403851e44335a141bf0af9d0cde7f5df7ae7a4386",
+      "source": "bundled:compiled/skills/mcp-builder/SKILL.md"
+    },
+    "skills/mobile-design/decision-trees.md": {
+      "hash": "ee1f041bf78d5fb86cc437786765939ebcf4232899a0c53c5d184fa826905f82",
+      "source": "bundled:compiled/skills/mobile-design/decision-trees.md"
+    },
+    "skills/mobile-design/mobile-backend.md": {
+      "hash": "c441de80869b240ee203a32ee2c0c1ffa96b0a124c8127974018859cfe0d38b5",
+      "source": "bundled:compiled/skills/mobile-design/mobile-backend.md"
+    },
+    "skills/mobile-design/mobile-color-system.md": {
+      "hash": "56ed723c311d9a7743b8115a263535fa1bbfabd471c1585900908e7911b1dcec",
+      "source": "bundled:compiled/skills/mobile-design/mobile-color-system.md"
+    },
+    "skills/mobile-design/mobile-debugging.md": {
+      "hash": "8109773cfb02eeaf7c1bccecaf3b34ad6846b1d6c805895eacb429c44b653748",
+      "source": "bundled:compiled/skills/mobile-design/mobile-debugging.md"
+    },
+    "skills/mobile-design/mobile-design-thinking.md": {
+      "hash": "1ca358cb4d3b82dd9a724f983c360c85e90c8b945a50ce3ac539bf6222094bef",
+      "source": "bundled:compiled/skills/mobile-design/mobile-design-thinking.md"
+    },
+    "skills/mobile-design/mobile-navigation.md": {
+      "hash": "683ebaffd12b75982260c95abb366670419658096300cce30e1103be54895291",
+      "source": "bundled:compiled/skills/mobile-design/mobile-navigation.md"
+    },
+    "skills/mobile-design/mobile-performance.md": {
+      "hash": "18ce2fb0197cbc10425c16f3cc5a24e905318a6db78b3e69ac61550e3a093d21",
+      "source": "bundled:compiled/skills/mobile-design/mobile-performance.md"
+    },
+    "skills/mobile-design/mobile-testing.md": {
+      "hash": "9c2f278304be0e3595f09f73f33240e137a6751a54e57ee2226e5f65de63d1bf",
+      "source": "bundled:compiled/skills/mobile-design/mobile-testing.md"
+    },
+    "skills/mobile-design/mobile-typography.md": {
+      "hash": "430651b2f027a5a22f924a7b2d017271b5d474d77cd051ce323600441b939a33",
+      "source": "bundled:compiled/skills/mobile-design/mobile-typography.md"
+    },
+    "skills/mobile-design/platform-android.md": {
+      "hash": "931e47583b4e5590f7865696f6ab4237e704ea049e2dd6de4d7a26cd1b9e9c60",
+      "source": "bundled:compiled/skills/mobile-design/platform-android.md"
+    },
+    "skills/mobile-design/platform-ios.md": {
+      "hash": "245fbdfd88626a0684a7ba7510eea3376d01f818c892f65c3c94be8639291e3b",
+      "source": "bundled:compiled/skills/mobile-design/platform-ios.md"
+    },
+    "skills/mobile-design/scripts/mobile_audit.py": {
+      "hash": "7d9f7b6813c8decb159462259ce09a6bc91ecfc602971c20ca3919981ac9efe6",
+      "source": "bundled:compiled/skills/mobile-design/scripts/mobile_audit.py"
+    },
+    "skills/mobile-design/SKILL.md": {
+      "hash": "d0201c90cd9a4aa99688416632446293e38179a697c00dcacacc4dd62b3afa0e",
+      "source": "bundled:compiled/skills/mobile-design/SKILL.md"
+    },
+    "skills/mobile-design/touch-psychology.md": {
+      "hash": "0b8fa3ee8dde45e50a255275195c07464a512cd2d7f0e2b707fe2d3a35af722d",
+      "source": "bundled:compiled/skills/mobile-design/touch-psychology.md"
+    },
+    "skills/nextjs-react-expert/1-async-eliminating-waterfalls.md": {
+      "hash": "afdeae2f6da48ec29c1612a5f247f919280d38f612499933066fb3984931db89",
+      "source": "bundled:compiled/skills/nextjs-react-expert/1-async-eliminating-waterfalls.md"
+    },
+    "skills/nextjs-react-expert/2-bundle-bundle-size-optimization.md": {
+      "hash": "149a605661bd9535890c22d6ed351b35cd957bb24fa2135bdd22f34a1c8a58a8",
+      "source": "bundled:compiled/skills/nextjs-react-expert/2-bundle-bundle-size-optimization.md"
+    },
+    "skills/nextjs-react-expert/3-server-server-side-performance.md": {
+      "hash": "f05a70604ed15dc44cf39aae45a9d7b098024900d036cfc300f3959218c08cac",
+      "source": "bundled:compiled/skills/nextjs-react-expert/3-server-server-side-performance.md"
+    },
+    "skills/nextjs-react-expert/4-client-client-side-data-fetching.md": {
+      "hash": "266078b46e152b48065cdb371dee4463873c254eb883b0f26490c9585860c6ca",
+      "source": "bundled:compiled/skills/nextjs-react-expert/4-client-client-side-data-fetching.md"
+    },
+    "skills/nextjs-react-expert/5-rerender-re-render-optimization.md": {
+      "hash": "ef95785005751d396c66a6680579951ce0e52a9e5c5f176f0c2118e1ea173e6b",
+      "source": "bundled:compiled/skills/nextjs-react-expert/5-rerender-re-render-optimization.md"
+    },
+    "skills/nextjs-react-expert/6-rendering-rendering-performance.md": {
+      "hash": "e3ad0f720bbbe0bc27c325b87fefae6eadb78baf64d26b08307f16564b2bc995",
+      "source": "bundled:compiled/skills/nextjs-react-expert/6-rendering-rendering-performance.md"
+    },
+    "skills/nextjs-react-expert/7-js-javascript-performance.md": {
+      "hash": "f593b42716cecfa7c993398f1c4a84bcc058546ae8ca6cc5fc95410eac2e58f4",
+      "source": "bundled:compiled/skills/nextjs-react-expert/7-js-javascript-performance.md"
+    },
+    "skills/nextjs-react-expert/8-advanced-advanced-patterns.md": {
+      "hash": "fee0c7f84eeb0606cc209383b5372dc5843c27c6116c3f19d379ff8e70943974",
+      "source": "bundled:compiled/skills/nextjs-react-expert/8-advanced-advanced-patterns.md"
+    },
+    "skills/nextjs-react-expert/scripts/convert_rules.py": {
+      "hash": "595442228c6824e2ca266b8ac8fc4bbfb10e9d3d36edd57f92c445ecb09afd42",
+      "source": "bundled:compiled/skills/nextjs-react-expert/scripts/convert_rules.py"
+    },
+    "skills/nextjs-react-expert/scripts/react_performance_checker.py": {
+      "hash": "f6b03ad06659489a362b1649f15711feb4d99f18c01d930775d3e5e376ff3ece",
+      "source": "bundled:compiled/skills/nextjs-react-expert/scripts/react_performance_checker.py"
+    },
+    "skills/nextjs-react-expert/SKILL.md": {
+      "hash": "2bd73d8a29c20895439d0786bec06d95a1517dbfe31482a9d9a97ed9c217ecbb",
+      "source": "bundled:compiled/skills/nextjs-react-expert/SKILL.md"
+    },
+    "skills/nodejs-best-practices/SKILL.md": {
+      "hash": "acbb5f34f34ddcce6e27ac0e4201f6fec69b03591b5d522f844580b4d3c4bafc",
+      "source": "bundled:compiled/skills/nodejs-best-practices/SKILL.md"
+    },
+    "skills/parallel-agents/SKILL.md": {
+      "hash": "d7d0d065f2cea456597b9f11e4893ed4d2a7063a5932f39a88c0bea69fb47587",
+      "source": "bundled:compiled/skills/parallel-agents/SKILL.md"
+    },
+    "skills/performance-profiling/scripts/lighthouse_audit.py": {
+      "hash": "7e3928f1ac24e472fd9b0bc390f223379d8ce3e3d9ff6136e557ac4bdad7f52c",
+      "source": "bundled:compiled/skills/performance-profiling/scripts/lighthouse_audit.py"
+    },
+    "skills/performance-profiling/SKILL.md": {
+      "hash": "912de77e6132ec9758d10f7d4e85af9470c1a5bdae95779cc3b874b4da9bb9d8",
+      "source": "bundled:compiled/skills/performance-profiling/SKILL.md"
+    },
+    "skills/plan-writing/SKILL.md": {
+      "hash": "05ca31b25e9fbd754185951e40e8b170e6f997ecf2f5d35d9ab6e3a307a09db6",
+      "source": "bundled:compiled/skills/plan-writing/SKILL.md"
+    },
+    "skills/powershell-windows/SKILL.md": {
+      "hash": "38cde84bff8b1740ab385173df9120d458683e0c3712292564e2e561fc10a815",
+      "source": "bundled:compiled/skills/powershell-windows/SKILL.md"
+    },
+    "skills/python-patterns/SKILL.md": {
+      "hash": "3098da2ab38b0fe1e8fc3de57bbc8dc65df9600918feea9323efe6ed8860757b",
+      "source": "bundled:compiled/skills/python-patterns/SKILL.md"
+    },
+    "skills/red-team-tactics/SKILL.md": {
+      "hash": "1d403c237ef8c1e45acbac43dc3f9ed6620e21a6459decca7fb598ffe98ca18a",
+      "source": "bundled:compiled/skills/red-team-tactics/SKILL.md"
+    },
+    "skills/rust-pro/SKILL.md": {
+      "hash": "a34267ab268f0a4d71ad7883bcd4662250e4b426e822abbcd65328f7b3392f2d",
+      "source": "bundled:compiled/skills/rust-pro/SKILL.md"
+    },
+    "skills/seo-fundamentals/scripts/seo_checker.py": {
+      "hash": "3844ce9d25d4440dac4cce55c42774a2a9f2dd5a1a892b8f7b1802d23686fb74",
+      "source": "bundled:compiled/skills/seo-fundamentals/scripts/seo_checker.py"
+    },
+    "skills/seo-fundamentals/SKILL.md": {
+      "hash": "cacf92bd18ca52f310ffad07395431ca8c8a6da31145e32329f02d117e9c0763",
+      "source": "bundled:compiled/skills/seo-fundamentals/SKILL.md"
+    },
+    "skills/server-management/SKILL.md": {
+      "hash": "94ccc714bb89d967fe7b5da62f605b3e836a0e9b65c73896e8b3bcfb938ec4c2",
+      "source": "bundled:compiled/skills/server-management/SKILL.md"
+    },
+    "skills/systematic-debugging/SKILL.md": {
+      "hash": "fdc07cb92d549f0e803cbbc035ede46d422ecc12505d893be9fb24e4be0c71f2",
+      "source": "bundled:compiled/skills/systematic-debugging/SKILL.md"
+    },
+    "skills/tailwind-patterns/SKILL.md": {
+      "hash": "d8a35f24340252420d2511454be3cb26b6b197972ce611115fa556ffc9cb9d09",
+      "source": "bundled:compiled/skills/tailwind-patterns/SKILL.md"
+    },
+    "skills/tdd-workflow/SKILL.md": {
+      "hash": "6d433629130bf3591486c469231f99c9edb361276b3951cdebcd42135dab4e13",
+      "source": "bundled:compiled/skills/tdd-workflow/SKILL.md"
+    },
+    "skills/testing-patterns/scripts/test_runner.py": {
+      "hash": "e09b21e2334913fbb6b2e840faa229874283fd76c79b3dd0f81c504f41585c8d",
+      "source": "bundled:compiled/skills/testing-patterns/scripts/test_runner.py"
+    },
+    "skills/testing-patterns/SKILL.md": {
+      "hash": "53588e24badf613c0d0cc3ede9b8591740468781377487c9355cd05dfd05f27f",
+      "source": "bundled:compiled/skills/testing-patterns/SKILL.md"
+    },
+    "skills/vulnerability-scanner/checklists.md": {
+      "hash": "84220004336e90244a5b0ef18d36694964e4d9bbf47503154d27016aa2c5f2d2",
+      "source": "bundled:compiled/skills/vulnerability-scanner/checklists.md"
+    },
+    "skills/vulnerability-scanner/scripts/security_scan.py": {
+      "hash": "dbbea2b5e0ce4d66bcd96408683620a764ac634767e4a87abe78264ea0834582",
+      "source": "bundled:compiled/skills/vulnerability-scanner/scripts/security_scan.py"
+    },
+    "skills/vulnerability-scanner/SKILL.md": {
+      "hash": "4b3be484b5a96a95cdd312597cc540d7721de22abd372575ed5d5b127e667475",
+      "source": "bundled:compiled/skills/vulnerability-scanner/SKILL.md"
+    },
+    "skills/web-design-guidelines/SKILL.md": {
+      "hash": "7b42ad27597c2177e5b8daed59f94d940a822bbd2aa3e8732b1a2e5685cd2214",
+      "source": "bundled:compiled/skills/web-design-guidelines/SKILL.md"
+    },
+    "skills/webapp-testing/scripts/playwright_runner.py": {
+      "hash": "122aedbf4fead451d04423857a7048fecf83e76ad4bfdc608787bca3fb3fbd5d",
+      "source": "bundled:compiled/skills/webapp-testing/scripts/playwright_runner.py"
+    },
+    "skills/webapp-testing/SKILL.md": {
+      "hash": "c4d4cd9fcead217ea64c4cc2f25a2c7a93d9b294fa1bf4aa44bb1f3ac33a3205",
+      "source": "bundled:compiled/skills/webapp-testing/SKILL.md"
+    },
+    "skills/workflow-brainstorm/SKILL.md": {
+      "hash": "25400702c215b476b98d1daf4db5bf6ce7f45b52026fdfef4df3dac7f09eb930",
+      "source": "bundled:compiled/skills/workflow-brainstorm/SKILL.md"
+    },
+    "skills/workflow-create/SKILL.md": {
+      "hash": "13f0a7d25d408005b8ad63c6874204e8754ce4986cb378e17cd202c98e2b654c",
+      "source": "bundled:compiled/skills/workflow-create/SKILL.md"
+    },
+    "skills/workflow-debug/SKILL.md": {
+      "hash": "350636f6aceebd4d22355e8ef3be6b92b6c7a2ad3d9c20aa197fd3ac2bdbae15",
+      "source": "bundled:compiled/skills/workflow-debug/SKILL.md"
+    },
+    "skills/workflow-deploy/SKILL.md": {
+      "hash": "6d64c2def2f10cc0929d39f70025f5f3ca104c7283efdd1bcfcfa46606290508",
+      "source": "bundled:compiled/skills/workflow-deploy/SKILL.md"
+    },
+    "skills/workflow-enhance/SKILL.md": {
+      "hash": "33dc17a66f3cda251b4a094d5ca9e60f62b1a27cb3f9faa247ae5a5f5116ce50",
+      "source": "bundled:compiled/skills/workflow-enhance/SKILL.md"
+    },
+    "skills/workflow-orchestrate/SKILL.md": {
+      "hash": "93ba6ab7056b6a130bb7cc74add8d9cf938b592fbceba71cac092c48ad5fad5c",
+      "source": "bundled:compiled/skills/workflow-orchestrate/SKILL.md"
+    },
+    "skills/workflow-plan/SKILL.md": {
+      "hash": "37dd0a68e06348b764c3dc0b526abd0749d3c994b19929cafc8b569169c4995f",
+      "source": "bundled:compiled/skills/workflow-plan/SKILL.md"
+    },
+    "skills/workflow-preview/SKILL.md": {
+      "hash": "1e79beecf7131e53945c276ca46bf808a6da14682fba17e7d63b4c4bdbd123b6",
+      "source": "bundled:compiled/skills/workflow-preview/SKILL.md"
+    },
+    "skills/workflow-restore-localize-compat/SKILL.md": {
+      "hash": "f97e75caed1a15e368604defb6cf9cc1188574cb5a6ce1511bd5670e2f5d0abf",
+      "source": "bundled:compiled/skills/workflow-restore-localize-compat/SKILL.md"
+    },
+    "skills/workflow-status/SKILL.md": {
+      "hash": "45206918e1a0be1cde60337ec3097e0bd8903207dc091cae5051f59b5dddf7df",
+      "source": "bundled:compiled/skills/workflow-status/SKILL.md"
+    },
+    "skills/workflow-test/SKILL.md": {
+      "hash": "cbdc3bd823f95628f978718420f548cbf4bbc564975e3024f610f999668c75a0",
+      "source": "bundled:compiled/skills/workflow-test/SKILL.md"
+    },
+    "skills/workflow-ui-ux-pro-max/SKILL.md": {
+      "hash": "67e6300b50a9cefbfb704f90e951d51542703311078bf41c680fbaf1d5ae5ce6",
+      "source": "bundled:compiled/skills/workflow-ui-ux-pro-max/SKILL.md"
+    }
+  }
+}
