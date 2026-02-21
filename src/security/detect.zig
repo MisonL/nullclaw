@@ -19,7 +19,7 @@ pub const SandboxBackend = enum {
 
 /// Detect and create the best available sandbox backend.
 ///
-/// Priority on Linux: landlock > firejail > bubblewrap > docker > noop
+/// Priority on Linux: firejail > bubblewrap > docker > noop
 /// Priority on macOS: docker > noop
 /// Explicit backend selection overrides auto-detection.
 pub fn createSandbox(
@@ -81,19 +81,13 @@ pub const SandboxStorage = struct {
 /// Auto-detect the best available sandbox backend.
 fn detectBest(allocator: std.mem.Allocator, workspace_dir: []const u8, storage: *SandboxStorage) Sandbox {
     if (comptime builtin.os.tag == .linux) {
-        // Try Landlock first (native, no external dependencies)
-        storage.landlock = .{ .workspace_dir = workspace_dir };
-        if (storage.landlock.sandbox().isAvailable()) {
-            return storage.landlock.sandbox();
-        }
-
-        // Try Firejail second
+        // Try Firejail first
         storage.firejail = .{ .workspace_dir = workspace_dir };
         if (storage.firejail.sandbox().isAvailable()) {
             return storage.firejail.sandbox();
         }
 
-        // Try Bubblewrap third
+        // Try Bubblewrap second
         storage.bubblewrap = .{ .workspace_dir = workspace_dir };
         if (storage.bubblewrap.sandbox().isAvailable()) {
             return storage.bubblewrap.sandbox();
@@ -147,9 +141,10 @@ pub fn detectAvailable(allocator: std.mem.Allocator, workspace_dir: []const u8) 
 
 test "detect available returns struct" {
     const avail = detectAvailable(std.testing.allocator, "/tmp/workspace");
-    // On macOS, landlock/firejail/bubblewrap should be false
+    // Landlock backend is currently a placeholder and should always be false.
+    try std.testing.expect(!avail.landlock);
+    // On non-Linux, firejail and bubblewrap should be unavailable.
     if (comptime builtin.os.tag != .linux) {
-        try std.testing.expect(!avail.landlock);
         try std.testing.expect(!avail.firejail);
         try std.testing.expect(!avail.bubblewrap);
     }

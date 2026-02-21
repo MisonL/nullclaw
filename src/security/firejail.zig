@@ -1,6 +1,19 @@
 const std = @import("std");
 const Sandbox = @import("sandbox.zig").Sandbox;
 
+fn commandExists(argv: []const []const u8) bool {
+    var child = std.process.Child.init(argv, std.heap.page_allocator);
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stdin_behavior = .Ignore;
+    child.spawn() catch return false;
+    const term = child.wait() catch return false;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
+
 /// Firejail sandbox backend for Linux.
 /// Wraps commands with `firejail` for user-space sandboxing.
 pub const FirejailSandbox = struct {
@@ -45,10 +58,9 @@ pub const FirejailSandbox = struct {
     }
 
     fn isAvailable(_: *anyopaque) bool {
-        // Check if firejail binary is reachable — cannot actually spawn in comptime,
-        // so we report true only on Linux where firejail is meaningful.
         const builtin = @import("builtin");
-        return comptime builtin.os.tag == .linux;
+        if (comptime builtin.os.tag != .linux) return false;
+        return commandExists(&.{ "firejail", "--version" });
     }
 
     fn getName(_: *anyopaque) []const u8 {

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("root.zig");
+const security = @import("../security/root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
@@ -29,6 +30,9 @@ pub const ShellTool = struct {
     allowed_paths: []const []const u8 = &.{},
     timeout_ns: u64 = DEFAULT_SHELL_TIMEOUT_NS,
     max_output_bytes: usize = DEFAULT_MAX_OUTPUT_BYTES,
+    sandbox_enabled: bool = false,
+    sandbox_backend: security.SandboxBackend = .auto,
+    sandbox_storage: security.SandboxStorage = .{},
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -91,9 +95,23 @@ pub const ShellTool = struct {
             break :blk cwd;
         } else self.workspace_dir;
 
-        // Execute via platform shell.
+        // Execute via platform shell (optionally wrapped by a sandbox backend).
         const argv = commandArgv(command);
-        var child = std.process.Child.init(&argv, allocator);
+        var child_argv: []const []const u8 = &argv;
+        var wrapped_argv_buf: [32][]const u8 = undefined;
+        if (self.sandbox_enabled) {
+            const sb = security.createSandbox(allocator, self.sandbox_backend, self.workspace_dir, &self.sandbox_storage);
+            if (self.sandbox_backend != .none and std.mem.eql(u8, sb.name(), "none")) {
+                const msg = try allocator.dupe(u8, "Sandbox enabled but no compatible backend is available");
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            }
+            child_argv = sb.wrapCommand(&argv, &wrapped_argv_buf) catch |err| {
+                const msg = try std.fmt.allocPrint(allocator, "Sandbox wrap failed: {}", .{err});
+                return ToolResult{ .success = false, .output = "", .error_msg = msg };
+            };
+        }
+
+        var child = std.process.Child.init(child_argv, allocator);
         child.cwd = effective_cwd;
 
         // Clear environment to prevent leaking API keys (CWE-200),
@@ -338,4 +356,27 @@ test "shell cwd with allowed_paths runs in cwd" {
 
     try std.testing.expect(result.success);
     try std.testing.expect(std.mem.indexOf(u8, result.output, tmp_path) != null);
+}
+
+test "shell sandbox enabled with unavailable backend fails fast" {
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    var st = ShellTool{
+        .workspace_dir = ws_path,
+        .sandbox_enabled = true,
+        .sandbox_backend = .landlock,
+    };
+    const parsed = try root.parseTestArgs("{\"command\": \"echo hello\"}");
+    defer parsed.deinit();
+
+    const result = try st.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+
+    try std.testing.expect(!result.success);
+    try std.testing.expect(result.error_msg != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "no compatible backend") != null);
 }

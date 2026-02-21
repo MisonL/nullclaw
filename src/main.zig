@@ -1133,6 +1133,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .agents = config.agents,
         .fallback_api_key = config.defaultProviderKey(),
         .tools_config = config.tools,
+        .security_config = config.security,
     }) catch &.{};
     defer if (tools.len > 0) allocator.free(tools);
 

@@ -1235,6 +1235,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .agents = cfg.agents,
         .fallback_api_key = cfg.defaultProviderKey(),
         .tools_config = cfg.tools,
+        .security_config = cfg.security,
     });
     defer allocator.free(tools);
 

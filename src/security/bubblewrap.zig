@@ -1,6 +1,19 @@
 const std = @import("std");
 const Sandbox = @import("sandbox.zig").Sandbox;
 
+fn commandExists(argv: []const []const u8) bool {
+    var child = std.process.Child.init(argv, std.heap.page_allocator);
+    child.stderr_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stdin_behavior = .Ignore;
+    child.spawn() catch return false;
+    const term = child.wait() catch return false;
+    return switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+}
+
 /// Bubblewrap (bwrap) sandbox backend.
 /// Wraps commands with `bwrap` for user-namespace isolation.
 pub const BubblewrapSandbox = struct {
@@ -60,7 +73,8 @@ pub const BubblewrapSandbox = struct {
 
     fn isAvailable(_: *anyopaque) bool {
         const builtin = @import("builtin");
-        return comptime (builtin.os.tag == .linux);
+        if (comptime builtin.os.tag != .linux) return false;
+        return commandExists(&.{ "bwrap", "--version" });
     }
 
     fn getName(_: *anyopaque) []const u8 {

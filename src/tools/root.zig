@@ -165,6 +165,19 @@ pub fn assertToolInterface(comptime T: type) void {
     _ = vt.parameters_json;
 }
 
+fn map_sandbox_backend(
+    backend: @import("../config.zig").SandboxBackend,
+) @import("../security/root.zig").SandboxBackend {
+    return switch (backend) {
+        .auto => .auto,
+        .none => .none,
+        .landlock => .landlock,
+        .firejail => .firejail,
+        .bubblewrap => .bubblewrap,
+        .docker => .docker,
+    };
+}
+
 /// Create the default tool set (shell, file_read, file_write).
 pub fn defaultTools(
     allocator: std.mem.Allocator,
@@ -219,6 +232,7 @@ pub fn allTools(
         subagent_manager: ?*@import("../subagent.zig").SubagentManager = null,
         allowed_paths: []const []const u8 = &.{},
         tools_config: @import("../config.zig").ToolsConfig = .{},
+        security_config: @import("../config.zig").SecurityConfig = .{},
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
@@ -233,6 +247,8 @@ pub fn allTools(
         .allowed_paths = opts.allowed_paths,
         .timeout_ns = tc.shell_timeout_secs * std.time.ns_per_s,
         .max_output_bytes = tc.shell_max_output_bytes,
+        .sandbox_enabled = opts.security_config.sandbox.enabled orelse false,
+        .sandbox_backend = map_sandbox_backend(opts.security_config.sandbox.backend),
     };
     try list.append(allocator, st.tool());
 

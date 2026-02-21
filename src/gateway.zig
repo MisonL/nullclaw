@@ -710,6 +710,7 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
                 .screenshot_enabled = true,
                 .agents = cfg.agents,
                 .fallback_api_key = cfg.defaultProviderKey(),
+                .security_config = cfg.security,
             }) catch &.{};
 
             // Noop observer.

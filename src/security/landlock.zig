@@ -22,21 +22,15 @@ pub const LandlockSandbox = struct {
         };
     }
 
-    fn wrapCommand(_: *anyopaque, argv: []const []const u8, _: [][]const u8) anyerror![]const []const u8 {
-        if (comptime builtin.os.tag != .linux) {
-            return error.UnsupportedPlatform;
-        }
-        // Landlock applies restrictions via syscalls on the spawning process before exec(),
-        // not by prepending a wrapper to the command (unlike firejail/bubblewrap).
-        // The caller is responsible for calling landlock_create_ruleset →
-        // landlock_add_rule → landlock_restrict_self on the current thread before
-        // spawning the child; the child inherits those restrictions automatically.
-        // wrapCommand therefore returns argv unchanged — no wrapper is needed.
-        return argv;
+    fn wrapCommand(_: *anyopaque, _: []const []const u8, _: [][]const u8) anyerror![]const []const u8 {
+        // This backend is currently a placeholder until full ruleset application
+        // is implemented before child process spawn.
+        return error.NotImplemented;
     }
 
     fn isAvailable(_: *anyopaque) bool {
-        return comptime builtin.os.tag == .linux;
+        // Returning false avoids a false security signal when users enable sandboxing.
+        return false;
     }
 
     fn getName(_: *anyopaque) []const u8 {
@@ -44,11 +38,8 @@ pub const LandlockSandbox = struct {
     }
 
     fn getDescription(_: *anyopaque) []const u8 {
-        if (comptime builtin.os.tag == .linux) {
-            return "Linux kernel LSM sandboxing (filesystem access control)";
-        } else {
-            return "Linux kernel LSM sandboxing (not available on this platform)";
-        }
+        _ = builtin;
+        return "Landlock backend placeholder (not implemented yet)";
     }
 };
 
@@ -67,30 +58,14 @@ test "landlock sandbox name" {
 test "landlock sandbox availability matches platform" {
     var ll = createLandlockSandbox("/tmp/workspace");
     const sb = ll.sandbox();
-    if (comptime builtin.os.tag == .linux) {
-        try std.testing.expect(sb.isAvailable());
-    } else {
-        try std.testing.expect(!sb.isAvailable());
-    }
+    try std.testing.expect(!sb.isAvailable());
 }
 
-test "landlock sandbox wrap command on non-linux returns error" {
-    if (comptime builtin.os.tag == .linux) return;
+test "landlock sandbox wrap command returns not implemented" {
     var ll = createLandlockSandbox("/tmp/workspace");
     const sb = ll.sandbox();
     const argv = [_][]const u8{ "echo", "test" };
     var buf: [16][]const u8 = undefined;
     const result = sb.wrapCommand(&argv, &buf);
-    try std.testing.expectError(error.UnsupportedPlatform, result);
-}
-
-test "landlock sandbox wrap command on linux passes through" {
-    if (comptime builtin.os.tag != .linux) return;
-    var ll = createLandlockSandbox("/tmp/workspace");
-    const sb = ll.sandbox();
-    const argv = [_][]const u8{ "echo", "test" };
-    var buf: [16][]const u8 = undefined;
-    const result = try sb.wrapCommand(&argv, &buf);
-    try std.testing.expectEqual(@as(usize, 2), result.len);
-    try std.testing.expectEqualStrings("echo", result[0]);
+    try std.testing.expectError(error.NotImplemented, result);
 }
