@@ -148,12 +148,17 @@ pub const GeminiAuth = union(enum) {
 /// - Google Cloud ADC (`GOOGLE_APPLICATION_CREDENTIALS`)
 pub const GeminiProvider = struct {
     auth: ?GeminiAuth,
+    base_url: []const u8,
     allocator: std.mem.Allocator,
 
-    const BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+    const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
     const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 
     pub fn init(allocator: std.mem.Allocator, api_key: ?[]const u8) GeminiProvider {
+        return initWithBaseUrl(allocator, api_key, null);
+    }
+
+    pub fn initWithBaseUrl(allocator: std.mem.Allocator, api_key: ?[]const u8, base_url: ?[]const u8) GeminiProvider {
         var auth: ?GeminiAuth = null;
 
         // 1. Explicit key
@@ -192,8 +197,14 @@ pub const GeminiProvider = struct {
 
         return .{
             .auth = auth,
+            .base_url = if (base_url) |u| trimTrailingSlash(u) else DEFAULT_BASE_URL,
             .allocator = allocator,
         };
+    }
+
+    fn trimTrailingSlash(s: []const u8) []const u8 {
+        if (s.len > 0 and s[s.len - 1] == '/') return s[0 .. s.len - 1];
+        return s;
     }
 
     fn loadNonEmptyEnv(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
@@ -233,6 +244,10 @@ pub const GeminiProvider = struct {
 
     /// Build the generateContent URL.
     pub fn buildUrl(allocator: std.mem.Allocator, model: []const u8, auth: GeminiAuth) ![]const u8 {
+        return buildUrlWithBase(allocator, DEFAULT_BASE_URL, model, auth);
+    }
+
+    pub fn buildUrlWithBase(allocator: std.mem.Allocator, base_url: []const u8, model: []const u8, auth: GeminiAuth) ![]const u8 {
         const model_name = if (std.mem.startsWith(u8, model, "models/"))
             model
         else
@@ -242,7 +257,7 @@ pub const GeminiProvider = struct {
             const url = try std.fmt.allocPrint(
                 allocator,
                 "{s}/{s}:generateContent?key={s}",
-                .{ BASE_URL, model_name, auth.credential() },
+                .{ trimTrailingSlash(base_url), model_name, auth.credential() },
             );
             if (!std.mem.startsWith(u8, model, "models/")) {
                 allocator.free(@constCast(model_name));
@@ -252,7 +267,7 @@ pub const GeminiProvider = struct {
             const url = try std.fmt.allocPrint(
                 allocator,
                 "{s}/{s}:generateContent",
-                .{ BASE_URL, model_name },
+                .{ trimTrailingSlash(base_url), model_name },
             );
             if (!std.mem.startsWith(u8, model, "models/")) {
                 allocator.free(@constCast(model_name));
@@ -346,7 +361,7 @@ pub const GeminiProvider = struct {
         const self: *GeminiProvider = @ptrCast(@alignCast(ptr));
         const auth = self.auth orelse return error.CredentialsNotSet;
 
-        const url = try buildUrl(allocator, model, auth);
+        const url = try buildUrlWithBase(allocator, self.base_url, model, auth);
         defer allocator.free(url);
 
         const body = try buildRequestBody(allocator, system_prompt, message, temperature);
@@ -374,7 +389,7 @@ pub const GeminiProvider = struct {
         const self: *GeminiProvider = @ptrCast(@alignCast(ptr));
         const auth = self.auth orelse return error.CredentialsNotSet;
 
-        const url = try buildUrl(allocator, model, auth);
+        const url = try buildUrlWithBase(allocator, self.base_url, model, auth);
         defer allocator.free(url);
 
         const body = try buildChatRequestBody(allocator, request, temperature);

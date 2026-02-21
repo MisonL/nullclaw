@@ -46,16 +46,17 @@ pub const ProviderInfo = struct {
     label: []const u8,
     default_model: []const u8,
     env_var: []const u8,
+    default_base_url: []const u8,
 };
 
 pub const known_providers = [_]ProviderInfo{
-    .{ .key = "openrouter", .label = "OpenRouter (multi-provider, recommended)", .default_model = "anthropic/claude-sonnet-4.5", .env_var = "OPENROUTER_API_KEY" },
-    .{ .key = "anthropic", .label = "Anthropic (Claude direct)", .default_model = "claude-sonnet-4-20250514", .env_var = "ANTHROPIC_API_KEY" },
-    .{ .key = "openai", .label = "OpenAI (GPT direct)", .default_model = "gpt-5.2", .env_var = "OPENAI_API_KEY" },
-    .{ .key = "gemini", .label = "Google Gemini", .default_model = "gemini-2.5-pro", .env_var = "GEMINI_API_KEY" },
-    .{ .key = "deepseek", .label = "DeepSeek", .default_model = "deepseek-chat", .env_var = "DEEPSEEK_API_KEY" },
-    .{ .key = "groq", .label = "Groq (fast inference)", .default_model = "llama-3.3-70b-versatile", .env_var = "GROQ_API_KEY" },
-    .{ .key = "ollama", .label = "Ollama (local)", .default_model = "llama3.2", .env_var = "API_KEY" },
+    .{ .key = "openrouter", .label = "OpenRouter (multi-provider, recommended)", .default_model = "anthropic/claude-sonnet-4.5", .env_var = "OPENROUTER_API_KEY", .default_base_url = "https://openrouter.ai/api/v1" },
+    .{ .key = "anthropic", .label = "Anthropic (Claude direct)", .default_model = "claude-sonnet-4-20250514", .env_var = "ANTHROPIC_API_KEY", .default_base_url = "https://api.anthropic.com" },
+    .{ .key = "openai", .label = "OpenAI (GPT direct)", .default_model = "gpt-5.2", .env_var = "OPENAI_API_KEY", .default_base_url = "https://api.openai.com/v1" },
+    .{ .key = "gemini", .label = "Google Gemini", .default_model = "gemini-2.5-pro", .env_var = "GEMINI_API_KEY", .default_base_url = "https://generativelanguage.googleapis.com/v1beta" },
+    .{ .key = "deepseek", .label = "DeepSeek", .default_model = "deepseek-chat", .env_var = "DEEPSEEK_API_KEY", .default_base_url = "https://api.deepseek.com" },
+    .{ .key = "groq", .label = "Groq (fast inference)", .default_model = "llama-3.3-70b-versatile", .env_var = "GROQ_API_KEY", .default_base_url = "https://api.groq.com/openai" },
+    .{ .key = "ollama", .label = "Ollama (local)", .default_model = "llama3.2", .env_var = "API_KEY", .default_base_url = "http://localhost:11434" },
 };
 
 /// Canonicalize provider name (handle aliases).
@@ -672,7 +673,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     defer cfg.deinit();
 
     // ── Step 1: Provider selection ──
-    try out.writeAll(if (zh) "  第 1/8 步：选择提供商\n" else "  Step 1/8: Select a provider\n");
+    try out.writeAll(if (zh) "  第 1/9 步：选择提供商\n" else "  Step 1/9: Select a provider\n");
     for (known_providers, 0..) |p, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, p.label });
     }
@@ -686,22 +687,49 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     cfg.default_provider = selected_provider.key;
     try out.print("  -> {s}\n\n", .{selected_provider.label});
 
-    // ── Step 2: API key ──
+    // ── Step 2: Base URL override (optional) ──
+    if (zh) {
+        try out.print("  第 2/9 步：Base URL（回车使用默认 {s}）: ", .{selected_provider.default_base_url});
+    } else {
+        try out.print("  Step 2/9: Base URL (press Enter to use default {s}): ", .{selected_provider.default_base_url});
+    }
+    const base_url_input = prompt(out, &input_buf, "", "") orelse {
+        try out.writeAll(aborted_msg);
+        try out.flush();
+        return;
+    };
+    const custom_base_url: ?[]const u8 = if (base_url_input.len > 0)
+        try cfg.ownedAllocator().dupe(u8, base_url_input)
+    else
+        null;
+    if (custom_base_url) |url| {
+        try out.print("  -> {s}\n\n", .{url});
+    } else {
+        try out.print("  -> {s}\n\n", .{selected_provider.default_base_url});
+    }
+
+    // ── Step 3: API key ──
     const env_hint = selected_provider.env_var;
     if (zh) {
-        try out.print("  第 2/8 步：输入 API Key（直接回车则使用环境变量 {s}）: ", .{env_hint});
+        try out.print("  第 3/9 步：输入 API Key（直接回车则使用环境变量 {s}）: ", .{env_hint});
     } else {
-        try out.print("  Step 2/8: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
+        try out.print("  Step 3/9: Enter API key (or press Enter to use env var {s}): ", .{env_hint});
     }
     const api_key_input = prompt(out, &input_buf, "", "") orelse {
         try out.writeAll(aborted_msg);
         try out.flush();
         return;
     };
-    if (api_key_input.len > 0) {
+    if (api_key_input.len > 0 or custom_base_url != null) {
         const entries = try cfg.ownedAllocator().alloc(config_mod.ProviderEntry, 1);
-        entries[0] = .{ .name = try cfg.ownedAllocator().dupe(u8, cfg.default_provider), .api_key = try cfg.ownedAllocator().dupe(u8, api_key_input) };
+        entries[0] = .{
+            .name = try cfg.ownedAllocator().dupe(u8, cfg.default_provider),
+            .api_key = if (api_key_input.len > 0) try cfg.ownedAllocator().dupe(u8, api_key_input) else null,
+            .base_url = custom_base_url,
+        };
         cfg.providers = entries;
+    }
+    if (api_key_input.len > 0) {
         try out.writeAll(if (zh) "  -> API Key 已设置\n\n" else "  -> API key set\n\n");
     } else {
         if (zh) {
@@ -711,8 +739,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         }
     }
 
-    // ── Step 3: Model (with live fetching) ──
-    try out.writeAll(if (zh) "  第 3/8 步：选择模型\n" else "  Step 3/8: Select a model\n");
+    // ── Step 4: Model (with live fetching) ──
+    try out.writeAll(if (zh) "  第 4/9 步：选择模型\n" else "  Step 4/9: Select a model\n");
     try out.writeAll(if (zh) "  正在拉取可用模型...\n" else "  Fetching available models...\n");
     try out.flush();
 
@@ -773,9 +801,9 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     }
     try out.print("  -> {s}\n\n", .{cfg.default_model.?});
 
-    // ── Step 4: Memory backend ──
+    // ── Step 5: Memory backend ──
     const backends = selectableBackends();
-    try out.writeAll(if (zh) "  第 4/8 步：记忆后端\n" else "  Step 4/8: Memory backend\n");
+    try out.writeAll(if (zh) "  第 5/9 步：记忆后端\n" else "  Step 5/9: Memory backend\n");
     for (backends, 0..) |b, i| {
         try out.print("    [{d}] {s}\n", .{ i + 1, b.label });
     }
@@ -789,8 +817,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     cfg.memory.auto_save = backends[mem_idx].auto_save_default;
     try out.print("  -> {s}\n\n", .{backends[mem_idx].label});
 
-    // ── Step 5: Tunnel ──
-    try out.writeAll(if (zh) "  第 5/8 步：隧道\n" else "  Step 5/8: Tunnel\n");
+    // ── Step 6: Tunnel ──
+    try out.writeAll(if (zh) "  第 6/9 步：隧道\n" else "  Step 6/9: Tunnel\n");
     try out.writeAll("    [1] none\n    [2] cloudflare\n    [3] ngrok\n    [4] tailscale\n");
     try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const tunnel_idx = promptChoice(out, &input_buf, tunnel_options.len, 0) orelse {
@@ -801,8 +829,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     cfg.tunnel.provider = tunnel_options[tunnel_idx];
     try out.print("  -> {s}\n\n", .{tunnel_options[tunnel_idx]});
 
-    // ── Step 6: Autonomy level ──
-    try out.writeAll(if (zh) "  第 6/8 步：自治级别\n" else "  Step 6/8: Autonomy level\n");
+    // ── Step 7: Autonomy level ──
+    try out.writeAll(if (zh) "  第 7/9 步：自治级别\n" else "  Step 7/9: Autonomy level\n");
     try out.writeAll("    [1] supervised\n    [2] autonomous\n    [3] fully_autonomous\n");
     try out.writeAll(if (zh) "  请选择 [1]: " else "  Choice [1]: ");
     const autonomy_idx = promptChoice(out, &input_buf, autonomy_options.len, 0) orelse {
@@ -818,8 +846,8 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
     };
     try out.print("  -> {s}\n\n", .{autonomy_options[autonomy_idx]});
 
-    // ── Step 7: Channels ──
-    try out.writeAll(if (zh) "  第 7/8 步：现在配置频道吗？[y/N]: " else "  Step 7/8: Configure channels now? [y/N]: ");
+    // ── Step 8: Channels ──
+    try out.writeAll(if (zh) "  第 8/9 步：现在配置频道吗？[y/N]: " else "  Step 8/9: Configure channels now? [y/N]: ");
     const chan_input = prompt(out, &input_buf, "", "n") orelse {
         try out.writeAll(aborted_msg);
         try out.flush();
@@ -832,12 +860,13 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         try out.writeAll(if (zh) "  -> 已跳过（CLI 默认启用）\n\n" else "  -> Skipped (CLI enabled by default)\n\n");
     }
 
-    // ── Step 8: Workspace path ──
+    // ── Step 9: Workspace path ──
     const default_workspace = try getDefaultWorkspace(allocator);
+    defer allocator.free(default_workspace);
     if (zh) {
-        try out.print("  第 8/8 步：工作目录 [{s}]: ", .{default_workspace});
+        try out.print("  第 9/9 步：工作目录 [{s}]: ", .{default_workspace});
     } else {
-        try out.print("  Step 8/8: Workspace path [{s}]: ", .{default_workspace});
+        try out.print("  Step 9/9: Workspace path [{s}]: ", .{default_workspace});
     }
     const ws_input = prompt(out, &input_buf, "", default_workspace) orelse {
         try out.writeAll(aborted_msg);
@@ -845,7 +874,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         return;
     };
     if (ws_input.len > 0) {
-        cfg.workspace_dir = try allocator.dupe(u8, ws_input);
+        cfg.workspace_dir = try cfg.ownedAllocator().dupe(u8, ws_input);
     }
     try out.print("  -> {s}\n\n", .{cfg.workspace_dir});
 
@@ -881,6 +910,12 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         } else {
             try out.print("  [OK] Model:      {s}\n", .{m});
         }
+    }
+    const effective_base_url = cfg.getProviderBaseUrl(cfg.default_provider) orelse selected_provider.default_base_url;
+    if (zh) {
+        try out.print("  [OK] Base URL:   {s}\n", .{effective_base_url});
+    } else {
+        try out.print("  [OK] Base URL:   {s}\n", .{effective_base_url});
     }
     if (zh) {
         try out.print("  [OK] API Key:    {s}\n", .{if (cfg.defaultProviderKey() != null) "已设置" else "使用环境变量"});
@@ -1463,6 +1498,7 @@ test "known_providers all have non-empty fields" {
         try std.testing.expect(p.label.len > 0);
         try std.testing.expect(p.default_model.len > 0);
         try std.testing.expect(p.env_var.len > 0);
+        try std.testing.expect(p.default_base_url.len > 0);
     }
 }
 

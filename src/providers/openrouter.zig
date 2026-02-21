@@ -17,18 +17,48 @@ const TokenUsage = root.TokenUsage;
 /// - Extra headers: HTTP-Referer, X-Title
 pub const OpenRouterProvider = struct {
     api_key: ?[]const u8,
+    base_url: []const u8,
     allocator: std.mem.Allocator,
 
-    const BASE_URL = "https://openrouter.ai/api/v1/chat/completions";
-    const WARMUP_URL = "https://openrouter.ai/api/v1/auth/key";
+    const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
     const REFERER = "https://github.com/nullclaw/nullclaw";
     const TITLE = "nullclaw";
 
     pub fn init(allocator: std.mem.Allocator, api_key: ?[]const u8) OpenRouterProvider {
+        return initWithBaseUrl(allocator, api_key, null);
+    }
+
+    pub fn initWithBaseUrl(allocator: std.mem.Allocator, api_key: ?[]const u8, base_url: ?[]const u8) OpenRouterProvider {
         return .{
             .api_key = api_key,
+            .base_url = if (base_url) |u| trimTrailingSlash(u) else DEFAULT_BASE_URL,
             .allocator = allocator,
         };
+    }
+
+    fn trimTrailingSlash(s: []const u8) []const u8 {
+        if (s.len > 0 and s[s.len - 1] == '/') return s[0 .. s.len - 1];
+        return s;
+    }
+
+    fn chatCompletionsUrl(self: OpenRouterProvider, allocator: std.mem.Allocator) ![]const u8 {
+        const trimmed = trimTrailingSlash(self.base_url);
+        if (std.mem.endsWith(u8, trimmed, "/chat/completions")) {
+            return try allocator.dupe(u8, trimmed);
+        }
+        return std.fmt.allocPrint(allocator, "{s}/chat/completions", .{trimmed});
+    }
+
+    fn warmupUrl(self: OpenRouterProvider, allocator: std.mem.Allocator) ![]const u8 {
+        const trimmed = trimTrailingSlash(self.base_url);
+        if (std.mem.endsWith(u8, trimmed, "/auth/key")) {
+            return try allocator.dupe(u8, trimmed);
+        }
+        if (std.mem.endsWith(u8, trimmed, "/chat/completions")) {
+            const prefix = trimmed[0 .. trimmed.len - "/chat/completions".len];
+            return std.fmt.allocPrint(allocator, "{s}/auth/key", .{prefix});
+        }
+        return std.fmt.allocPrint(allocator, "{s}/auth/key", .{trimmed});
     }
 
     /// Build a chat request JSON body.
@@ -144,7 +174,9 @@ pub const OpenRouterProvider = struct {
         const api_key = self.api_key orelse return;
         const auth_hdr = std.fmt.allocPrint(self.allocator, "Authorization: Bearer {s}", .{api_key}) catch return;
         defer self.allocator.free(auth_hdr);
-        const resp = curlGet(self.allocator, WARMUP_URL, auth_hdr) catch return;
+        const url = self.warmupUrl(self.allocator) catch return;
+        defer self.allocator.free(url);
+        const resp = curlGet(self.allocator, url, auth_hdr) catch return;
         self.allocator.free(resp);
     }
 
@@ -221,6 +253,8 @@ pub const OpenRouterProvider = struct {
         temperature: f64,
     ) ![]const u8 {
         const api_key = self.api_key orelse return error.CredentialsNotSet;
+        const url = try self.chatCompletionsUrl(allocator);
+        defer allocator.free(url);
 
         const msgs_json = try convertMessages(allocator, messages, system);
         defer allocator.free(msgs_json);
@@ -239,7 +273,7 @@ pub const OpenRouterProvider = struct {
         const title_hdr = try std.fmt.allocPrint(allocator, "X-Title: {s}", .{TITLE});
         defer allocator.free(title_hdr);
 
-        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
+        const resp_body = root.curlPost(allocator, url, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -277,6 +311,8 @@ pub const OpenRouterProvider = struct {
     ) anyerror![]const u8 {
         const self: *OpenRouterProvider = @ptrCast(@alignCast(ptr));
         const api_key = self.api_key orelse return error.CredentialsNotSet;
+        const url = try self.chatCompletionsUrl(allocator);
+        defer allocator.free(url);
 
         const body = try buildRequestBody(allocator, system_prompt, message, model, temperature);
         defer allocator.free(body);
@@ -290,7 +326,7 @@ pub const OpenRouterProvider = struct {
         const title_hdr = try std.fmt.allocPrint(allocator, "X-Title: {s}", .{TITLE});
         defer allocator.free(title_hdr);
 
-        const resp_body = root.curlPost(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
+        const resp_body = root.curlPost(allocator, url, body, &.{ auth_hdr, referer_hdr, title_hdr }) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseTextResponse(allocator, resp_body);
@@ -305,6 +341,8 @@ pub const OpenRouterProvider = struct {
     ) anyerror!ChatResponse {
         const self: *OpenRouterProvider = @ptrCast(@alignCast(ptr));
         const api_key = self.api_key orelse return error.CredentialsNotSet;
+        const url = try self.chatCompletionsUrl(allocator);
+        defer allocator.free(url);
 
         const body = try buildChatRequestBody(allocator, request, model, temperature);
         defer allocator.free(body);
@@ -318,7 +356,7 @@ pub const OpenRouterProvider = struct {
         const title_hdr = try std.fmt.allocPrint(allocator, "X-Title: {s}", .{TITLE});
         defer allocator.free(title_hdr);
 
-        const resp_body = root.curlPostTimed(allocator, BASE_URL, body, &.{ auth_hdr, referer_hdr, title_hdr }, request.timeout_secs) catch return error.OpenRouterApiError;
+        const resp_body = root.curlPostTimed(allocator, url, body, &.{ auth_hdr, referer_hdr, title_hdr }, request.timeout_secs) catch return error.OpenRouterApiError;
         defer allocator.free(resp_body);
 
         return parseNativeResponse(allocator, resp_body);

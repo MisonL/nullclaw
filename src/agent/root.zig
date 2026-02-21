@@ -1130,19 +1130,20 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             if (std.mem.startsWith(u8, cfg.default_provider, "anthropic-custom:"))
                 cfg.default_provider["anthropic-custom:".len..]
             else
-                null,
+                cfg.getProviderBaseUrl(cfg.default_provider),
         ) },
-        .openai_provider => .{ .openai = providers.openai.OpenAiProvider.init(allocator, cfg.defaultProviderKey()) },
-        .gemini_provider => .{ .gemini = providers.gemini.GeminiProvider.init(allocator, cfg.defaultProviderKey()) },
-        .ollama_provider => .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) },
-        .openrouter_provider => .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, cfg.defaultProviderKey()) },
+        .openai_provider => .{ .openai = providers.openai.OpenAiProvider.initWithBaseUrl(allocator, cfg.defaultProviderKey(), cfg.getProviderBaseUrl(cfg.default_provider)) },
+        .gemini_provider => .{ .gemini = providers.gemini.GeminiProvider.initWithBaseUrl(allocator, cfg.defaultProviderKey(), cfg.getProviderBaseUrl(cfg.default_provider)) },
+        .ollama_provider => .{ .ollama = providers.ollama.OllamaProvider.init(allocator, cfg.getProviderBaseUrl(cfg.default_provider)) },
+        .openrouter_provider => .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, cfg.defaultProviderKey(), cfg.getProviderBaseUrl(cfg.default_provider)) },
         .compatible_provider => .{ .compatible = providers.compatible.OpenAiCompatibleProvider.init(
             allocator,
             cfg.default_provider,
             if (std.mem.startsWith(u8, cfg.default_provider, "custom:"))
                 cfg.default_provider["custom:".len..]
             else
-                providers.compatibleProviderUrl(cfg.default_provider) orelse "https://openrouter.ai/api/v1",
+                cfg.getProviderBaseUrl(cfg.default_provider) orelse
+                    providers.compatibleProviderUrl(cfg.default_provider) orelse "https://openrouter.ai/api/v1",
             cfg.defaultProviderKey(),
             .bearer,
         ) },

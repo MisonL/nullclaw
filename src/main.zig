@@ -1166,17 +1166,17 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
 
     const api_key = config.defaultProviderKey();
     var holder: ProviderHolder = if (std.mem.eql(u8, config.default_provider, "anthropic"))
-        .{ .anthropic = yc.providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
+        .{ .anthropic = yc.providers.anthropic.AnthropicProvider.init(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) }
     else if (std.mem.eql(u8, config.default_provider, "openai"))
-        .{ .openai = yc.providers.openai.OpenAiProvider.init(allocator, api_key) }
+        .{ .openai = yc.providers.openai.OpenAiProvider.initWithBaseUrl(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) }
     else if (std.mem.eql(u8, config.default_provider, "gemini") or
         std.mem.eql(u8, config.default_provider, "google"))
-        .{ .gemini = yc.providers.gemini.GeminiProvider.init(allocator, api_key) }
+        .{ .gemini = yc.providers.gemini.GeminiProvider.initWithBaseUrl(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) }
     else if (std.mem.eql(u8, config.default_provider, "ollama"))
-        .{ .ollama = yc.providers.ollama.OllamaProvider.init(allocator, null) }
+        .{ .ollama = yc.providers.ollama.OllamaProvider.init(allocator, config.getProviderBaseUrl(config.default_provider)) }
     else
         // Default: OpenRouter (also handles all other provider names)
-        .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
+        .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) };
 
     const provider_i: yc.providers.Provider = switch (holder) {
         .openrouter => |*p| p.provider(),
