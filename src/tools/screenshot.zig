@@ -48,7 +48,7 @@ pub const ScreenshotTool = struct {
         const filename = root.getString(args, "filename") orelse "screenshot.png";
 
         // Build output path: workspace_dir/filename
-        const output_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.workspace_dir, filename });
+        const output_path = try std.fs.path.join(allocator, &.{ self.workspace_dir, filename });
         defer allocator.free(output_path);
 
         // In test mode, return a mock result without spawning a real process
@@ -83,7 +83,7 @@ pub const ScreenshotTool = struct {
 
         switch (term) {
             .Exited => |code| if (code == 0) {
-                const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ self.workspace_dir, filename });
+                const full_path = try std.fs.path.join(allocator, &.{ self.workspace_dir, filename });
                 defer allocator.free(full_path);
                 const msg = try std.fmt.allocPrint(allocator, "[IMAGE:{s}]", .{full_path});
                 return ToolResult{ .success = true, .output = msg };

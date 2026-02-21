@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -29,7 +30,9 @@ pub const SYSTEM_BLOCKED_PREFIXES = [_][]const u8{
 /// Check whether a directory-style prefix matches (exact or followed by '/').
 fn pathStartsWith(path: []const u8, prefix: []const u8) bool {
     if (!std.mem.startsWith(u8, path, prefix)) return false;
-    return path.len == prefix.len or path[prefix.len] == '/';
+    if (path.len == prefix.len) return true;
+    const sep = path[prefix.len];
+    return sep == '/' or sep == '\\';
 }
 
 /// Check whether a **resolved** absolute path is allowed by the policy:
@@ -107,7 +110,7 @@ pub const FileEditTool = struct {
             return ToolResult.fail("Missing 'new_text' parameter");
 
         // Build full path — absolute or relative
-        const full_path = if (path.len > 0 and path[0] == '/') blk: {
+        const full_path = if (std.fs.path.isAbsolute(path)) blk: {
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("Absolute paths not allowed (no allowed_paths configured)");
             if (std.mem.indexOfScalar(u8, path, 0) != null)
@@ -183,11 +186,16 @@ pub const FileEditTool = struct {
 
 /// Check if a relative path is safe (no traversal, no absolute path).
 pub fn isPathSafe(path: []const u8) bool {
-    if (path.len > 0 and path[0] == '/') return false;
+    if (std.fs.path.isAbsolute(path)) return false;
     if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
-    var iter = std.mem.splitScalar(u8, path, '/');
-    while (iter.next()) |component| {
+
+    var i: usize = 0;
+    while (i < path.len) {
+        const start = i;
+        while (i < path.len and path[i] != '/' and path[i] != '\\') : (i += 1) {}
+        const component = path[start..i];
         if (std.mem.eql(u8, component, "..")) return false;
+        if (i < path.len) i += 1;
     }
     return true;
 }
@@ -471,8 +479,13 @@ test "file_edit absolute path with allowed_paths works" {
     defer std.testing.allocator.free(abs_file);
 
     // Use a different workspace but allow tmp_dir via allowed_paths
-    var args_buf: [512]u8 = undefined;
-    const args = try std.fmt.bufPrint(&args_buf, "{{\"path\": \"{s}\", \"old_text\": \"world\", \"new_text\": \"zig\"}}", .{abs_file});
+    const escaped_abs_file = if (builtin.os.tag == .windows)
+        try std.mem.replaceOwned(u8, std.testing.allocator, abs_file, "\\", "\\\\")
+    else
+        try std.testing.allocator.dupe(u8, abs_file);
+    defer std.testing.allocator.free(escaped_abs_file);
+    const args = try std.fmt.allocPrint(std.testing.allocator, "{{\"path\": \"{s}\", \"old_text\": \"world\", \"new_text\": \"zig\"}}", .{escaped_abs_file});
+    defer std.testing.allocator.free(args);
     const parsed = try root.parseTestArgs(args);
     defer parsed.deinit();
 

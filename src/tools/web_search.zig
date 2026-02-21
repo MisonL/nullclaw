@@ -59,8 +59,11 @@ pub const WebSearchTool = struct {
         const count = parseCount(args);
 
         // Get API key from environment
-        const api_key = std.posix.getenv("BRAVE_API_KEY") orelse
-            return ToolResult.fail("BRAVE_API_KEY environment variable not set. Get a free key at https://brave.com/search/api/");
+        const api_key = std.process.getEnvVarOwned(allocator, "BRAVE_API_KEY") catch |err| switch (err) {
+            error.EnvironmentVariableNotFound => return ToolResult.fail("BRAVE_API_KEY environment variable not set. Get a free key at https://brave.com/search/api/"),
+            else => return ToolResult.fail("Failed to read BRAVE_API_KEY environment variable"),
+        };
+        defer allocator.free(api_key);
 
         if (api_key.len == 0)
             return ToolResult.fail("BRAVE_API_KEY is empty");
@@ -254,7 +257,10 @@ test "WebSearchTool empty query fails" {
 test "WebSearchTool no API key fails with helpful message" {
     // This test relies on BRAVE_API_KEY not being set in test env
     // If it is set, the test would try to make a real request
-    if (std.posix.getenv("BRAVE_API_KEY")) |_| return;
+    if (std.process.getEnvVarOwned(std.testing.allocator, "BRAVE_API_KEY")) |key| {
+        std.testing.allocator.free(key);
+        return;
+    } else |_| {}
     var wst = WebSearchTool{};
     const parsed = try root.parseTestArgs("{\"query\":\"zig programming\"}");
     defer parsed.deinit();

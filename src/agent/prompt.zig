@@ -104,9 +104,15 @@ fn appendSkillsSection(
     workspace_dir: []const u8,
 ) !void {
     // Two-source loading: workspace skills + ~/.nullclaw/skills/community/
-    const home_dir = std.posix.getenv("HOME") orelse "";
-    const community_base = if (home_dir.len > 0)
-        std.fmt.allocPrint(allocator, "{s}/.nullclaw/skills", .{home_dir}) catch null
+    const home_dir: ?[]u8 = if (std.process.getEnvVarOwned(allocator, "HOME")) |h|
+        h
+    else |_| if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |h|
+        h
+    else |_|
+        null;
+    defer if (home_dir) |h| allocator.free(h);
+    const community_base = if (home_dir) |h|
+        std.fs.path.join(allocator, &.{ h, ".nullclaw", "skills" }) catch null
     else
         null;
     defer if (community_base) |cb| allocator.free(cb);
@@ -167,10 +173,12 @@ fn appendSkillsSection(
             );
         } else {
             const skill_path = if (skill.path.len > 0) skill.path else workspace_dir;
+            const skill_md_path = try std.fs.path.join(allocator, &.{ skill_path, "SKILL.md" });
+            defer allocator.free(skill_md_path);
             try std.fmt.format(
                 w,
-                "  <skill name=\"{s}\" description=\"{s}\" path=\"{s}/SKILL.md\"/>\n",
-                .{ skill.name, skill.description, skill_path },
+                "  <skill name=\"{s}\" description=\"{s}\" path=\"{s}\"/>\n",
+                .{ skill.name, skill.description, skill_md_path },
             );
         }
     }
@@ -242,8 +250,13 @@ fn injectWorkspaceFile(
 
 test "buildSystemPrompt includes core sections" {
     const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
     const prompt = try buildSystemPrompt(allocator, .{
-        .workspace_dir = "/tmp/nonexistent",
+        .workspace_dir = workspace_dir,
         .model_name = "test-model",
         .tools = &.{},
     });
@@ -285,25 +298,33 @@ test "appendDateTimeSection outputs UTC timestamp" {
 
 test "appendSkillsSection with no skills produces nothing" {
     const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, "/tmp/nullclaw-prompt-test-no-skills");
+    try appendSkillsSection(allocator, w, workspace_dir);
 
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
 
 test "appendSkillsSection renders summary XML for always=false skill" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-prompt-test-skills";
-    const skills_dir = "/tmp/nullclaw-prompt-test-skills/skills";
-    const skill_dir = "/tmp/nullclaw-prompt-test-skills/skills/greeter";
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "greeter" });
+    defer allocator.free(skill_dir);
+    const skill_json_path = try std.fs.path.join(allocator, &.{ skill_dir, "skill.json" });
+    defer allocator.free(skill_json_path);
 
     // Setup
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -312,11 +333,10 @@ test "appendSkillsSection renders summary XML for always=false skill" {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
 
     // always defaults to false — should render as summary XML
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-skills/skills/greeter/skill.json", .{});
+        const f = try std.fs.createFileAbsolute(skill_json_path, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"greeter\", \"version\": \"1.0.0\", \"description\": \"Greets the user\", \"author\": \"dev\"}");
     }
@@ -340,14 +360,19 @@ test "appendSkillsSection renders summary XML for always=false skill" {
 
 test "appendSkillsSection renders full instructions for always=true skill" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-prompt-test-always";
-    const skills_dir = "/tmp/nullclaw-prompt-test-always/skills";
-    const skill_dir = "/tmp/nullclaw-prompt-test-always/skills/commit";
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "commit" });
+    defer allocator.free(skill_dir);
+    const skill_json_path = try std.fs.path.join(allocator, &.{ skill_dir, "skill.json" });
+    defer allocator.free(skill_json_path);
+    const skill_md_path = try std.fs.path.join(allocator, &.{ skill_dir, "SKILL.md" });
+    defer allocator.free(skill_md_path);
 
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -356,16 +381,15 @@ test "appendSkillsSection renders full instructions for always=true skill" {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
 
     // always=true skill with instructions
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-always/skills/commit/skill.json", .{});
+        const f = try std.fs.createFileAbsolute(skill_json_path, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"commit\", \"description\": \"Git commit helper\", \"always\": true}");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-always/skills/commit/SKILL.md", .{});
+        const f = try std.fs.createFileAbsolute(skill_md_path, .{});
         defer f.close();
         try f.writeAll("Always stage before committing.");
     }
@@ -386,42 +410,51 @@ test "appendSkillsSection renders full instructions for always=true skill" {
 
 test "appendSkillsSection renders mixed always=true and always=false" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-prompt-test-mixed";
-    const skills_dir = "/tmp/nullclaw-prompt-test-mixed/skills";
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const full_skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "full-skill" });
+    defer allocator.free(full_skill_dir);
+    const lazy_skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "lazy-skill" });
+    defer allocator.free(lazy_skill_dir);
+    const full_skill_json = try std.fs.path.join(allocator, &.{ full_skill_dir, "skill.json" });
+    defer allocator.free(full_skill_json);
+    const full_skill_md = try std.fs.path.join(allocator, &.{ full_skill_dir, "SKILL.md" });
+    defer allocator.free(full_skill_md);
+    const lazy_skill_json = try std.fs.path.join(allocator, &.{ lazy_skill_dir, "skill.json" });
+    defer allocator.free(lazy_skill_json);
 
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-prompt-test-mixed/skills/full-skill") catch |err| switch (err) {
+    std.fs.makeDirAbsolute(full_skill_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    std.fs.makeDirAbsolute("/tmp/nullclaw-prompt-test-mixed/skills/lazy-skill") catch |err| switch (err) {
+    std.fs.makeDirAbsolute(lazy_skill_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
 
     // always=true skill
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-mixed/skills/full-skill/skill.json", .{});
+        const f = try std.fs.createFileAbsolute(full_skill_json, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"full-skill\", \"description\": \"Full loader\", \"always\": true}");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-mixed/skills/full-skill/SKILL.md", .{});
+        const f = try std.fs.createFileAbsolute(full_skill_md, .{});
         defer f.close();
         try f.writeAll("Full instructions here.");
     }
 
     // always=false skill (default)
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-mixed/skills/lazy-skill/skill.json", .{});
+        const f = try std.fs.createFileAbsolute(lazy_skill_json, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"lazy-skill\", \"description\": \"Lazy loader\"}");
     }
@@ -444,14 +477,17 @@ test "appendSkillsSection renders mixed always=true and always=false" {
 
 test "appendSkillsSection renders unavailable skill with missing deps" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-prompt-test-unavail";
-    const skills_dir = "/tmp/nullclaw-prompt-test-unavail/skills";
-    const skill_dir = "/tmp/nullclaw-prompt-test-unavail/skills/docker-deploy";
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "docker-deploy" });
+    defer allocator.free(skill_dir);
+    const skill_json_path = try std.fs.path.join(allocator, &.{ skill_dir, "skill.json" });
+    defer allocator.free(skill_json_path);
 
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -460,11 +496,10 @@ test "appendSkillsSection renders unavailable skill with missing deps" {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
 
     // Skill requiring nonexistent binary and env
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-unavail/skills/docker-deploy/skill.json", .{});
+        const f = try std.fs.createFileAbsolute(skill_json_path, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"docker-deploy\", \"description\": \"Deploy with docker\", \"requires_bins\": [\"nullclaw_fake_docker_xyz\"], \"requires_env\": [\"NULLCLAW_FAKE_TOKEN_XYZ\"]}");
     }
@@ -486,14 +521,19 @@ test "appendSkillsSection renders unavailable skill with missing deps" {
 
 test "appendSkillsSection unavailable always=true skill renders in XML not full" {
     const allocator = std.testing.allocator;
-    const base = "/tmp/nullclaw-prompt-test-unavail-always";
-    const skills_dir = "/tmp/nullclaw-prompt-test-unavail-always/skills";
-    const skill_dir = "/tmp/nullclaw-prompt-test-unavail-always/skills/broken-always";
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "broken-always" });
+    defer allocator.free(skill_dir);
+    const skill_json_path = try std.fs.path.join(allocator, &.{ skill_dir, "skill.json" });
+    defer allocator.free(skill_json_path);
+    const skill_md_path = try std.fs.path.join(allocator, &.{ skill_dir, "SKILL.md" });
+    defer allocator.free(skill_md_path);
 
-    std.fs.makeDirAbsolute(base) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
     std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -502,16 +542,15 @@ test "appendSkillsSection unavailable always=true skill renders in XML not full"
         error.PathAlreadyExists => {},
         else => return err,
     };
-    defer std.fs.deleteTreeAbsolute(base) catch {};
 
     // always=true but requires nonexistent binary → should be unavailable
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-unavail-always/skills/broken-always/skill.json", .{});
+        const f = try std.fs.createFileAbsolute(skill_json_path, .{});
         defer f.close();
         try f.writeAll("{\"name\": \"broken-always\", \"description\": \"Broken always skill\", \"always\": true, \"requires_bins\": [\"nullclaw_nonexistent_xyz_aaa\"]}");
     }
     {
-        const f = try std.fs.createFileAbsolute("/tmp/nullclaw-prompt-test-unavail-always/skills/broken-always/SKILL.md", .{});
+        const f = try std.fs.createFileAbsolute(skill_md_path, .{});
         defer f.close();
         try f.writeAll("These instructions should NOT appear in prompt.");
     }
@@ -532,8 +571,13 @@ test "appendSkillsSection unavailable always=true skill renders in XML not full"
 
 test "buildSystemPrompt datetime appears before runtime" {
     const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
     const prompt = try buildSystemPrompt(allocator, .{
-        .workspace_dir = "/tmp/nonexistent",
+        .workspace_dir = workspace_dir,
         .model_name = "test-model",
         .tools = &.{},
     });

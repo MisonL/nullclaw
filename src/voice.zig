@@ -16,6 +16,39 @@ fn getPid() i32 {
     return 0;
 }
 
+fn resolveTempDir(allocator: std.mem.Allocator) ![]u8 {
+    const vars = [_][]const u8{ "TMPDIR", "TEMP", "TMP" };
+    for (vars) |name| {
+        if (std.process.getEnvVarOwned(allocator, name)) |value| {
+            if (value.len > 0 and std.fs.path.isAbsolute(value)) {
+                return value;
+            }
+            allocator.free(value);
+        } else |_| {}
+    }
+
+    if (builtin.os.tag == .windows) {
+        return allocator.dupe(u8, "C:\\Temp");
+    }
+    return allocator.dupe(u8, "/tmp");
+}
+
+fn makeTempFilePath(allocator: std.mem.Allocator, stem: []const u8, ext: []const u8) ![]u8 {
+    const dir = try resolveTempDir(allocator);
+    defer allocator.free(dir);
+
+    std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => {},
+    };
+
+    const suffix = std.crypto.random.int(u64);
+    const name = try std.fmt.allocPrint(allocator, "{s}_{d}_{x}{s}", .{ stem, getPid(), suffix, ext });
+    defer allocator.free(name);
+
+    return std.fs.path.join(allocator, &.{ dir, name });
+}
+
 pub const TranscribeOptions = struct {
     model: []const u8 = "whisper-large-v3",
     language: ?[]const u8 = null,
@@ -94,13 +127,8 @@ pub fn transcribeFile(
     const boundary = generateBoundary() catch return error.BoundaryGenerationFailed;
 
     // Build temp file path
-    var tmp_path_buf: [256]u8 = undefined;
-    var tmp_fbs = std.io.fixedBufferStream(&tmp_path_buf);
-    tmp_fbs.writer().print("/tmp/nullclaw_voice_{d}.bin", .{getPid()}) catch
-        return error.FileReadFailed;
-    const tmp_path_len = tmp_fbs.pos;
-    tmp_path_buf[tmp_path_len] = 0;
-    const tmp_path: [:0]const u8 = tmp_path_buf[0..tmp_path_len :0];
+    const tmp_path = makeTempFilePath(allocator, "nullclaw_voice", ".bin") catch return error.FileReadFailed;
+    defer allocator.free(tmp_path);
 
     // Write multipart body directly to temp file (avoids holding file_data + body in memory)
     writeMultipartToTempFile(tmp_path, file_path, &boundary, opts) catch
@@ -191,7 +219,7 @@ fn buildMultipartBody(
 /// through without building the full body in memory.
 /// This avoids holding both file_data and multipart body in RAM simultaneously.
 fn writeMultipartToTempFile(
-    tmp_path: [:0]const u8,
+    tmp_path: []const u8,
     audio_path: []const u8,
     boundary: []const u8,
     opts: TranscribeOptions,
@@ -255,7 +283,7 @@ fn parseTranscriptionText(allocator: std.mem.Allocator, json_resp: []const u8) !
 fn curlPostFromFile(
     allocator: std.mem.Allocator,
     url: []const u8,
-    file_path: [:0]const u8,
+    file_path: []const u8,
     headers: []const []const u8,
 ) ![]u8 {
     // Build data-binary arg: @/path/to/file
@@ -384,7 +412,8 @@ fn getFilePath(allocator: std.mem.Allocator, bot_token: []const u8, file_id: []c
     return try allocator.dupe(u8, fp_val.string);
 }
 
-/// Download a file from Telegram and save to /tmp. Returns the local path (owned).
+/// Download a file from Telegram and save to a temp directory.
+/// Returns the local path (owned).
 fn downloadTelegramFile(allocator: std.mem.Allocator, bot_token: []const u8, tg_file_path: []const u8) ![]u8 {
     var url_buf: [1024]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&url_buf);
@@ -395,24 +424,15 @@ fn downloadTelegramFile(allocator: std.mem.Allocator, bot_token: []const u8, tg_
     defer allocator.free(data);
 
     // Save to temp file
-    const pid = getPid();
-    var path_buf: [256]u8 = undefined;
-    var path_fbs = std.io.fixedBufferStream(&path_buf);
-    try path_fbs.writer().print("/tmp/nullclaw_tg_voice_{d}.ogg", .{pid});
-    const local_path = path_fbs.getWritten();
-
-    var z_buf: [256]u8 = undefined;
-    @memcpy(z_buf[0..local_path.len], local_path);
-    z_buf[local_path.len] = 0;
-    const local_path_z: [:0]const u8 = z_buf[0..local_path.len :0];
+    const local_path = try makeTempFilePath(allocator, "nullclaw_tg_voice", ".ogg");
 
     {
-        const f = try std.fs.createFileAbsolute(local_path_z, .{});
+        const f = try std.fs.createFileAbsolute(local_path, .{});
         defer f.close();
         try f.writeAll(data);
     }
 
-    return try allocator.dupe(u8, local_path);
+    return local_path;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

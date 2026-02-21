@@ -273,6 +273,7 @@ test "SubagentManager init and deinit" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
     defer mgr.deinit();
@@ -308,6 +309,7 @@ test "SubagentManager getRunningCount empty" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
     defer mgr.deinit();
@@ -319,6 +321,7 @@ test "SubagentManager getTaskStatus unknown id" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
     defer mgr.deinit();
@@ -330,6 +333,7 @@ test "SubagentManager getTaskResult unknown id" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
     defer mgr.deinit();
@@ -341,6 +345,7 @@ test "SubagentManager completeTask updates state" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
     defer mgr.deinit();
@@ -365,6 +370,7 @@ test "SubagentManager completeTask with error" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var mgr = SubagentManager.init(std.testing.allocator, &cfg, null, .{});
     defer mgr.deinit();
@@ -388,6 +394,7 @@ test "SubagentManager completeTask routes via bus" {
         .workspace_dir = "/tmp/yc",
         .config_path = "/tmp/yc/config.json",
         .allocator = std.testing.allocator,
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
     };
     var bus = bus_mod.Bus.init();
     defer bus.close();

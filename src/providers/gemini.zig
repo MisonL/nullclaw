@@ -75,9 +75,15 @@ pub fn parseCredentialsJson(allocator: std.mem.Allocator, json_bytes: []const u8
 /// Try to load Gemini CLI OAuth credentials from ~/.gemini/oauth_creds.json.
 /// Returns null on any error (file not found, parse failure, expired token, etc.).
 pub fn tryLoadGeminiCliToken(allocator: std.mem.Allocator) ?GeminiCliCredentials {
-    const home: []const u8 = std.posix.getenv("HOME") orelse return null;
+    const home: []u8 = if (std.process.getEnvVarOwned(allocator, "HOME")) |h|
+        h
+    else |_| if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |h|
+        h
+    else |_|
+        return null;
+    defer allocator.free(home);
 
-    const path = std.fmt.allocPrint(allocator, "{s}/.gemini/oauth_creds.json", .{home}) catch return null;
+    const path = std.fs.path.join(allocator, &.{ home, ".gemini", "oauth_creds.json" }) catch return null;
     defer allocator.free(path);
 
     const file = std.fs.openFileAbsolute(path, .{}) catch return null;

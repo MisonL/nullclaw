@@ -88,6 +88,24 @@ pub const BrowserTool = struct {
             return ToolResult{ .success = true, .output = msg };
         }
 
+        if (comptime builtin.os.tag == .windows) {
+            // On Windows, use "cmd /c start <url>"
+            var child = std.process.Child.init(
+                &.{ "cmd", "/c", "start", "", url },
+                allocator,
+            );
+            child.stdout_behavior = .Pipe;
+            child.stderr_behavior = .Pipe;
+            child.spawn() catch {
+                return ToolResult.fail("Failed to spawn browser open command");
+            };
+            _ = child.stdout.?.readToEndAlloc(allocator, 4096) catch "";
+            _ = child.stderr.?.readToEndAlloc(allocator, 4096) catch "";
+            _ = child.wait() catch {};
+            const msg = try std.fmt.allocPrint(allocator, "Opened {s} in system browser", .{url});
+            return ToolResult{ .success = true, .output = msg };
+        }
+
         const open_cmd = comptime if (builtin.os.tag == .macos)
             "open"
         else if (builtin.os.tag == .linux)

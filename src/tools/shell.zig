@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -11,8 +12,16 @@ const DEFAULT_SHELL_TIMEOUT_NS: u64 = 60 * std.time.ns_per_s;
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1_048_576;
 /// Environment variables safe to pass to shell commands.
 const SAFE_ENV_VARS = [_][]const u8{
-    "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
+    "PATH",       "HOME",    "TERM",    "LANG", "LC_ALL", "LC_CTYPE",    "USER",      "SHELL",    "TMPDIR",
+    "SystemRoot", "ComSpec", "PATHEXT", "TEMP", "TMP",    "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
 };
+
+fn commandArgv(command: []const u8) [3][]const u8 {
+    if (builtin.os.tag == .windows) {
+        return .{ "cmd", "/C", command };
+    }
+    return .{ "/bin/sh", "-c", command };
+}
 
 /// Shell command execution tool with workspace scoping.
 pub const ShellTool = struct {
@@ -62,7 +71,7 @@ pub const ShellTool = struct {
         // Determine working directory
         const effective_cwd = if (root.getString(args, "cwd")) |cwd| blk: {
             // cwd must be absolute
-            if (cwd.len == 0 or cwd[0] != '/')
+            if (!std.fs.path.isAbsolute(cwd))
                 return ToolResult.fail("cwd must be an absolute path");
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("cwd not allowed (no allowed_paths configured)");
@@ -82,11 +91,9 @@ pub const ShellTool = struct {
             break :blk cwd;
         } else self.workspace_dir;
 
-        // Execute via /bin/sh -c
-        var child = std.process.Child.init(
-            &.{ "/bin/sh", "-c", command },
-            allocator,
-        );
+        // Execute via platform shell.
+        const argv = commandArgv(command);
+        var child = std.process.Child.init(&argv, allocator);
         child.cwd = effective_cwd;
 
         // Clear environment to prevent leaking API keys (CWE-200),
@@ -96,9 +103,9 @@ pub const ShellTool = struct {
         var env = std.process.EnvMap.init(allocator);
         defer env.deinit();
         for (&SAFE_ENV_VARS) |key| {
-            if (std.posix.getenv(key)) |val| {
-                try env.put(key, val);
-            }
+            const val = std.process.getEnvVarOwned(allocator, key) catch continue;
+            defer allocator.free(val);
+            try env.put(key, val);
         }
         child.env_map = &env;
 
@@ -212,7 +219,12 @@ test "shell tool schema has command" {
 }
 
 test "shell executes echo" {
-    var st = ShellTool{ .workspace_dir = "/tmp" };
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    var st = ShellTool{ .workspace_dir = ws_path };
     const t = st.tool();
     const parsed = try root.parseTestArgs("{\"command\": \"echo hello\"}");
     defer parsed.deinit();
@@ -224,9 +236,14 @@ test "shell executes echo" {
 }
 
 test "shell captures failing command" {
-    var st = ShellTool{ .workspace_dir = "/tmp" };
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const ws_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(ws_path);
+
+    var st = ShellTool{ .workspace_dir = ws_path };
     const t = st.tool();
-    const parsed = try root.parseTestArgs("{\"command\": \"ls /nonexistent_dir_xyz_42\"}");
+    const parsed = try root.parseTestArgs("{\"command\": \"exit 1\"}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
@@ -302,8 +319,14 @@ test "shell cwd with allowed_paths runs in cwd" {
     const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
     defer std.testing.allocator.free(tmp_path);
 
-    var args_buf: [512]u8 = undefined;
-    const args = try std.fmt.bufPrint(&args_buf, "{{\"command\": \"pwd\", \"cwd\": \"{s}\"}}", .{tmp_path});
+    const cwd_command = if (builtin.os.tag == .windows) "cd" else "pwd";
+    const escaped_tmp_path = if (builtin.os.tag == .windows)
+        try std.mem.replaceOwned(u8, std.testing.allocator, tmp_path, "\\", "\\\\")
+    else
+        try std.testing.allocator.dupe(u8, tmp_path);
+    defer std.testing.allocator.free(escaped_tmp_path);
+    const args = try std.fmt.allocPrint(std.testing.allocator, "{{\"command\": \"{s}\", \"cwd\": \"{s}\"}}", .{ cwd_command, escaped_tmp_path });
+    defer std.testing.allocator.free(args);
 
     const parsed = try root.parseTestArgs(args);
     defer parsed.deinit();

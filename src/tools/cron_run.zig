@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -64,9 +65,10 @@ pub const CronRunTool = struct {
         };
 
         // Execute the command
+        const argv = shellArgv(command);
         const result = std.process.Child.run(.{
             .allocator = allocator,
-            .argv = &.{ "sh", "-c", command },
+            .argv = &argv,
             .max_output_bytes = 65536,
         }) catch |err| {
             // Update last_status to error
@@ -107,6 +109,13 @@ pub const CronRunTool = struct {
         return ToolResult{ .success = true, .output = msg };
     }
 };
+
+fn shellArgv(command: []const u8) [3][]const u8 {
+    if (builtin.os.tag == .windows) {
+        return .{ "cmd", "/C", command };
+    }
+    return .{ "sh", "-c", command };
+}
 
 // ── Tests ───────────────────────────────────────────────────────────
 

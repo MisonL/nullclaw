@@ -1043,10 +1043,11 @@ fn cliStreamCallback(_: *anyopaque, chunk: providers.StreamChunk) void {
 /// Run the agent in single-message or interactive REPL mode.
 /// This is the main entry point called by `nullclaw agent`.
 pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
-    const cfg = Config.load(allocator) catch {
+    var cfg = Config.load(allocator) catch {
         log.err("No config found. Run `nullclaw onboard` first.", .{});
         return;
     };
+    defer cfg.deinit();
 
     var out_buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&out_buf);

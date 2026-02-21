@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
@@ -53,7 +54,7 @@ pub const FileReadTool = struct {
             return ToolResult.fail("Missing 'path' parameter");
 
         // Build full path — absolute or relative
-        const full_path = if (path.len > 0 and path[0] == '/') blk: {
+        const full_path = if (std.fs.path.isAbsolute(path)) blk: {
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("Absolute paths not allowed (no allowed_paths configured)");
             if (std.mem.indexOfScalar(u8, path, 0) != null)
@@ -266,8 +267,13 @@ test "file_read absolute path with allowed_paths works" {
     const abs_file = try std.fs.path.join(std.testing.allocator, &.{ ws_path, "hello.txt" });
     defer std.testing.allocator.free(abs_file);
 
-    var args_buf: [512]u8 = undefined;
-    const args = try std.fmt.bufPrint(&args_buf, "{{\"path\": \"{s}\"}}", .{abs_file});
+    const escaped_abs_file = if (builtin.os.tag == .windows)
+        try std.mem.replaceOwned(u8, std.testing.allocator, abs_file, "\\", "\\\\")
+    else
+        try std.testing.allocator.dupe(u8, abs_file);
+    defer std.testing.allocator.free(escaped_abs_file);
+    const args = try std.fmt.allocPrint(std.testing.allocator, "{{\"path\": \"{s}\"}}", .{escaped_abs_file});
+    defer std.testing.allocator.free(args);
     const parsed = try root.parseTestArgs(args);
     defer parsed.deinit();
 

@@ -142,7 +142,7 @@ pub const PushoverTool = struct {
 
     fn getCredentials(self: *const PushoverTool, allocator: std.mem.Allocator) !struct { token: []const u8, user_key: []const u8 } {
         // Build path to .env
-        const env_path = try std.fmt.allocPrint(allocator, "{s}/.env", .{self.workspace_dir});
+        const env_path = try std.fs.path.join(allocator, &.{ self.workspace_dir, ".env" });
         defer allocator.free(env_path);
 
         const content = std.fs.cwd().readFileAlloc(allocator, env_path, 1_048_576) catch
