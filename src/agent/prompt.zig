@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const tools_mod = @import("../tools/root.zig");
 const Tool = tools_mod.Tool;
 const skills_mod = @import("../skills.zig");
@@ -50,12 +51,28 @@ pub fn buildSystemPrompt(
     try appendDateTimeSection(w);
 
     // Runtime section
+    const runtime_label = try runtimeOsLabel(allocator);
+    defer allocator.free(runtime_label);
     try std.fmt.format(w, "## Runtime\n\nOS: {s} | Model: {s}\n\n", .{
-        @tagName(comptime std.Target.Os.Tag.macos),
+        runtime_label,
         ctx.model_name,
     });
 
     return try buf.toOwnedSlice(allocator);
+}
+
+fn runtimeOsLabel(allocator: std.mem.Allocator) ![]u8 {
+    if (builtin.os.tag == .windows) {
+        if (std.process.getEnvVarOwned(allocator, "MSYSTEM")) |msystem| {
+            defer allocator.free(msystem);
+            return std.fmt.allocPrint(allocator, "windows (git-bash:{s})", .{msystem});
+        } else |err| switch (err) {
+            error.EnvironmentVariableNotFound => {},
+            error.OutOfMemory => return err,
+            else => {},
+        }
+    }
+    return allocator.dupe(u8, @tagName(builtin.os.tag));
 }
 
 fn buildIdentitySection(
@@ -281,6 +298,19 @@ test "buildSystemPrompt includes workspace dir" {
     defer allocator.free(prompt);
 
     try std.testing.expect(std.mem.indexOf(u8, prompt, "/my/workspace") != null);
+}
+
+test "buildSystemPrompt runtime section reflects host os" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/tmp",
+        .model_name = "test-model",
+        .tools = &.{},
+    });
+    defer allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## Runtime") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, @tagName(builtin.os.tag)) != null);
 }
 
 test "appendDateTimeSection outputs UTC timestamp" {
