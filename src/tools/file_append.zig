@@ -8,8 +8,8 @@ const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
-const isPathSafe = @import("file_edit.zig").isPathSafe;
-const isResolvedPathAllowed = @import("file_edit.zig").isResolvedPathAllowed;
+const isPathSafe = @import("path_security.zig").isPathSafe;
+const isResolvedPathAllowed = @import("path_security.zig").isResolvedPathAllowed;
 
 /// Default maximum file size to read before appending (10MB).
 const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
@@ -20,12 +20,13 @@ pub const FileAppendTool = struct {
     allowed_paths: []const []const u8 = &.{},
     max_file_size: usize = DEFAULT_MAX_FILE_SIZE,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "file_append";
+    pub const tool_description = "Append content to the end of a file (creates the file if it doesn't exist)";
+    pub const tool_params =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative path to the file within the workspace"},"content":{"type":"string","description":"Content to append to the file"}},"required":["path","content"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *FileAppendTool) Tool {
         return .{
@@ -34,26 +35,7 @@ pub const FileAppendTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *FileAppendTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "file_append";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Append content to the end of a file (creates the file if it doesn't exist)";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative path to the file within the workspace"},"content":{"type":"string","description":"Content to append to the file"}},"required":["path","content"]}
-        ;
-    }
-
-    fn execute(self: *FileAppendTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *FileAppendTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const path = root.getString(args, "path") orelse
             return ToolResult.fail("Missing 'path' parameter");
 

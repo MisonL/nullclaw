@@ -445,6 +445,18 @@ pub const SqliteMemory = struct {
         if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.StepFailed;
     }
 
+    /// Delete all auto-saved memory entries (autosave_user_*, autosave_assistant_*).
+    /// Called on /new to prevent stale tool context from being recalled.
+    pub fn clearAutoSaved(self: *Self) !void {
+        const sql = "DELETE FROM memories WHERE key LIKE 'autosave_%'";
+        var stmt: ?*c.sqlite3_stmt = null;
+        const rc = c.sqlite3_prepare_v2(self.db, sql, -1, &stmt, null);
+        if (rc != c.SQLITE_OK) return error.PrepareFailed;
+        defer _ = c.sqlite3_finalize(stmt);
+
+        if (c.sqlite3_step(stmt) != c.SQLITE_DONE) return error.StepFailed;
+    }
+
     pub fn reindex(self: *Self) !void {
         var err_msg: [*c]u8 = null;
         const rc = c.sqlite3_exec(
@@ -1485,4 +1497,49 @@ test "sqlite schema migration is idempotent" {
     const entry = (try m.get(std.testing.allocator, "k1")).?;
     defer entry.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("sess-x", entry.session_id.?);
+}
+
+// ── clearAutoSaved tests ──────────────────────────────────────────
+
+test "sqlite clearAutoSaved removes autosave entries" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+    const m = mem.memory();
+
+    try m.store("autosave_user_1000", "user msg", .conversation, null);
+    try m.store("autosave_assistant_1001", "assistant reply", .daily, null);
+    try m.store("normal_key", "keep this", .core, null);
+
+    try std.testing.expectEqual(@as(usize, 3), try m.count());
+
+    try mem.clearAutoSaved();
+
+    try std.testing.expectEqual(@as(usize, 1), try m.count());
+    const entry = (try m.get(std.testing.allocator, "normal_key")).?;
+    defer entry.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("keep this", entry.content);
+}
+
+test "sqlite clearAutoSaved preserves non-autosave entries" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+    const m = mem.memory();
+
+    try m.store("user_pref", "likes Zig", .core, null);
+    try m.store("daily_note", "some note", .daily, null);
+    try m.store("autosave_like_prefix", "not autosave", .core, null);
+
+    try mem.clearAutoSaved();
+
+    // "autosave_like_prefix" starts with "autosave_" so it IS removed
+    try std.testing.expectEqual(@as(usize, 2), try m.count());
+}
+
+test "sqlite clearAutoSaved no-op on empty" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+
+    try mem.clearAutoSaved();
+    const m = mem.memory();
+    try std.testing.expectEqual(@as(usize, 0), try m.count());
 }

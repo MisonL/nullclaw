@@ -4,6 +4,8 @@ const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
+const isPathSafe = @import("path_security.zig").isPathSafe;
+const isResolvedPathAllowed = @import("path_security.zig").isResolvedPathAllowed;
 
 /// Default maximum file size to read for editing (10MB).
 const DEFAULT_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
@@ -66,12 +68,13 @@ pub const FileEditTool = struct {
     allowed_paths: []const []const u8 = &.{},
     max_file_size: usize = DEFAULT_MAX_FILE_SIZE,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "file_edit";
+    pub const tool_description = "Find and replace text in a file";
+    pub const tool_params =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative path to the file within the workspace"},"old_text":{"type":"string","description":"Text to find in the file"},"new_text":{"type":"string","description":"Replacement text"}},"required":["path","old_text","new_text"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *FileEditTool) Tool {
         return .{
@@ -80,26 +83,7 @@ pub const FileEditTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *FileEditTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "file_edit";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Find and replace text in a file";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative path to the file within the workspace"},"old_text":{"type":"string","description":"Text to find in the file"},"new_text":{"type":"string","description":"Replacement text"}},"required":["path","old_text","new_text"]}
-        ;
-    }
-
-    fn execute(self: *FileEditTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *FileEditTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const path = root.getString(args, "path") orelse
             return ToolResult.fail("Missing 'path' parameter");
 
@@ -366,96 +350,6 @@ test "file_edit empty old_text" {
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "must not be empty") != null);
 }
 
-// ── isResolvedPathAllowed tests ─────────────────────────────────────
-
-test "isResolvedPathAllowed allows workspace path" {
-    try std.testing.expect(isResolvedPathAllowed(
-        std.testing.allocator,
-        "/home/user/workspace/file.txt",
-        "/home/user/workspace",
-        &.{},
-    ));
-}
-
-test "isResolvedPathAllowed allows exact workspace" {
-    try std.testing.expect(isResolvedPathAllowed(
-        std.testing.allocator,
-        "/home/user/workspace",
-        "/home/user/workspace",
-        &.{},
-    ));
-}
-
-test "isResolvedPathAllowed rejects outside workspace" {
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/home/user/other/file.txt",
-        "/home/user/workspace",
-        &.{},
-    ));
-}
-
-test "isResolvedPathAllowed rejects partial prefix match" {
-    // /home/user/workspace-evil should NOT match /home/user/workspace
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/home/user/workspace-evil/file.txt",
-        "/home/user/workspace",
-        &.{},
-    ));
-}
-
-test "isResolvedPathAllowed blocks system paths" {
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/etc/passwd",
-        "/etc",
-        &.{},
-    ));
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/System/Library/something",
-        "/home/ws",
-        &.{"/System"},
-    ));
-    try std.testing.expect(!isResolvedPathAllowed(
-        std.testing.allocator,
-        "/bin/sh",
-        "/home/ws",
-        &.{"/bin"},
-    ));
-}
-
-test "isResolvedPathAllowed allows via allowed_paths" {
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    const tmp_path = try tmp_dir.dir.realpathAlloc(std.testing.allocator, ".");
-    defer std.testing.allocator.free(tmp_path);
-
-    try tmp_dir.dir.writeFile(.{ .sub_path = "test.txt", .data = "" });
-    const file_path = try std.fs.path.join(std.testing.allocator, &.{ tmp_path, "test.txt" });
-    defer std.testing.allocator.free(file_path);
-
-    try std.testing.expect(isResolvedPathAllowed(
-        std.testing.allocator,
-        file_path,
-        "/nonexistent-workspace",
-        &.{tmp_path},
-    ));
-}
-
-test "pathStartsWith exact match" {
-    try std.testing.expect(pathStartsWith("/foo/bar", "/foo/bar"));
-}
-
-test "pathStartsWith with trailing component" {
-    try std.testing.expect(pathStartsWith("/foo/bar/baz", "/foo/bar"));
-}
-
-test "pathStartsWith rejects partial" {
-    try std.testing.expect(!pathStartsWith("/foo/barbaz", "/foo/bar"));
-}
-
 // ── Absolute path support tests ─────────────────────────────────────
 
 test "file_edit absolute path without allowed_paths is rejected" {
@@ -477,6 +371,18 @@ test "file_edit absolute path with allowed_paths works" {
     defer std.testing.allocator.free(ws_path);
     const abs_file = try std.fs.path.join(std.testing.allocator, &.{ ws_path, "test.txt" });
     defer std.testing.allocator.free(abs_file);
+
+    // JSON-escape backslashes in the path (needed on Windows where paths use \)
+    var escaped_buf: [1024]u8 = undefined;
+    var esc_len: usize = 0;
+    for (abs_file) |c| {
+        if (c == '\\') {
+            escaped_buf[esc_len] = '\\';
+            esc_len += 1;
+        }
+        escaped_buf[esc_len] = c;
+        esc_len += 1;
+    }
 
     // Use a different workspace but allow tmp_dir via allowed_paths
     const escaped_abs_file = if (builtin.os.tag == .windows)

@@ -86,18 +86,6 @@ pub const Channel = struct {
     }
 };
 
-/// Comptime check that a type correctly implements the Channel interface.
-pub fn assertChannelInterface(comptime T: type) void {
-    if (!@hasDecl(T, "channel")) @compileError(@typeName(T) ++ " missing channel() method");
-    if (!@hasDecl(T, "vtable")) @compileError(@typeName(T) ++ " missing vtable constant");
-    const vt = T.vtable;
-    _ = vt.start;
-    _ = vt.stop;
-    _ = vt.send;
-    _ = vt.name;
-    _ = vt.healthCheck;
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // Channel Sub-modules
 // ════════════════════════════════════════════════════════════════════════════

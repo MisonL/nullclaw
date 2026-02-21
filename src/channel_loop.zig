@@ -39,27 +39,8 @@ pub const TelegramLoopState = struct {
     }
 };
 
-// ════════════════════════════════════════════════════════════════════════════
-// ProviderHolder — tagged union so the concrete provider lives on the heap
-// ════════════════════════════════════════════════════════════════════════════
-
-pub const ProviderHolder = union(enum) {
-    openrouter: providers.openrouter.OpenRouterProvider,
-    anthropic: providers.anthropic.AnthropicProvider,
-    openai: providers.openai.OpenAiProvider,
-    gemini: providers.gemini.GeminiProvider,
-    ollama: providers.ollama.OllamaProvider,
-
-    pub fn provider(self: *ProviderHolder) providers.Provider {
-        return switch (self.*) {
-            .openrouter => |*p| p.provider(),
-            .anthropic => |*p| p.provider(),
-            .openai => |*p| p.provider(),
-            .gemini => |*p| p.provider(),
-            .ollama => |*p| p.provider(),
-        };
-    }
-};
+// Re-export centralized ProviderHolder from providers module.
+pub const ProviderHolder = providers.ProviderHolder;
 
 // ════════════════════════════════════════════════════════════════════════════
 // ChannelRuntime — container for polling-thread dependencies
@@ -79,18 +60,7 @@ pub const ChannelRuntime = struct {
         const holder = try allocator.create(ProviderHolder);
         errdefer allocator.destroy(holder);
 
-        const api_key = config.defaultProviderKey();
-        holder.* = if (std.mem.eql(u8, config.default_provider, "anthropic"))
-            .{ .anthropic = providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
-        else if (std.mem.eql(u8, config.default_provider, "openai"))
-            .{ .openai = providers.openai.OpenAiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, config.default_provider, "gemini") or
-            std.mem.eql(u8, config.default_provider, "google"))
-            .{ .gemini = providers.gemini.GeminiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, config.default_provider, "ollama"))
-            .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) }
-        else
-            .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
+        holder.* = ProviderHolder.fromConfig(allocator, config.default_provider, config.defaultProviderKey());
 
         const provider_i = holder.provider();
 
@@ -243,10 +213,9 @@ pub fn runTelegramLoop(
                 typing.stop();
                 log.err("Agent error: {}", .{err});
                 const err_msg: []const u8 = switch (err) {
-                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Ошибка сети. Попробуй ещё раз.",
-                    error.MaxToolIterationsExceeded => "Превышен лимит итераций инструментов.",
-                    error.OutOfMemory => "Недостаточно памяти для обработки.",
-                    else => "Произошла ошибка. Попробуй ещё раз или /new для новой сессии.",
+                    error.CurlFailed, error.CurlReadError, error.CurlWaitError => "Network error. Please try again.",
+                    error.OutOfMemory => "Out of memory.",
+                    else => "An error occurred. Try again or /new for a fresh session.",
                 };
                 tg_ptr.sendMessageWithReply(msg.sender, err_msg, reply_to_id) catch |send_err| log.err("failed to send error reply: {}", .{send_err});
                 continue;
@@ -312,4 +281,6 @@ test "ProviderHolder tagged union fields" {
     try std.testing.expect(@hasField(ProviderHolder, "openai"));
     try std.testing.expect(@hasField(ProviderHolder, "gemini"));
     try std.testing.expect(@hasField(ProviderHolder, "ollama"));
+    try std.testing.expect(@hasField(ProviderHolder, "compatible"));
+    try std.testing.expect(@hasField(ProviderHolder, "openai_codex"));
 }

@@ -9,12 +9,13 @@ const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// CronUpdate tool — update a cron job's expression, command, or enabled state.
 pub const CronUpdateTool = struct {
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "cron_update";
+    pub const tool_description = "Update a cron job: change expression, command, or enable/disable it.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"job_id":{"type":"string","description":"ID of the cron job to update"},"expression":{"type":"string","description":"New cron expression"},"command":{"type":"string","description":"New command to execute"},"enabled":{"type":"boolean","description":"Enable or disable the job"}},"required":["job_id"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *CronUpdateTool) Tool {
         return .{
@@ -23,26 +24,7 @@ pub const CronUpdateTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *CronUpdateTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "cron_update";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Update a cron job: change expression, command, or enable/disable it.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"job_id":{"type":"string","description":"ID of the cron job to update"},"expression":{"type":"string","description":"New cron expression"},"command":{"type":"string","description":"New command to execute"},"enabled":{"type":"boolean","description":"Enable or disable the job"}},"required":["job_id"]}
-        ;
-    }
-
-    fn execute(_: *CronUpdateTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(_: *CronUpdateTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const job_id = root.getString(args, "job_id") orelse
             return ToolResult.fail("Missing 'job_id' parameter");
 

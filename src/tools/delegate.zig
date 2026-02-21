@@ -18,12 +18,13 @@ pub const DelegateTool = struct {
     /// Current delegation depth. Incremented for sub-delegates.
     depth: u32 = 0,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "delegate";
+    pub const tool_description = "Delegate a subtask to a specialized agent. Use when a task benefits from a different model.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"agent":{"type":"string","minLength":1,"description":"Name of the agent to delegate to"},"prompt":{"type":"string","minLength":1,"description":"The task/prompt to send to the sub-agent"},"context":{"type":"string","description":"Optional context to prepend"}},"required":["agent","prompt"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *DelegateTool) Tool {
         return .{
@@ -32,26 +33,7 @@ pub const DelegateTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *DelegateTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "delegate";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Delegate a subtask to a specialized agent. Use when a task benefits from a different model.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"agent":{"type":"string","minLength":1,"description":"Name of the agent to delegate to"},"prompt":{"type":"string","minLength":1,"description":"The task/prompt to send to the sub-agent"},"context":{"type":"string","description":"Optional context to prepend"}},"required":["agent","prompt"]}
-        ;
-    }
-
-    fn execute(self: *DelegateTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *DelegateTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const agent_name = root.getString(args, "agent") orelse
             return ToolResult.fail("Missing 'agent' parameter");
 
@@ -125,11 +107,10 @@ pub const DelegateTool = struct {
         }
 
         // Fallback: no agent config found — load global config
-        var cfg_arena = std.heap.ArenaAllocator.init(allocator);
-        defer cfg_arena.deinit();
-        const cfg = Config.load(cfg_arena.allocator()) catch {
+        var cfg = Config.load(allocator) catch {
             return ToolResult.fail("Failed to load config — run `nullclaw onboard` first");
         };
+        defer cfg.deinit();
 
         const agent_prompt = std.fmt.allocPrint(
             allocator,

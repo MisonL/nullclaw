@@ -8,6 +8,7 @@
 //!   - Creates backup before import
 
 const std = @import("std");
+const platform = @import("platform.zig");
 const Config = @import("config.zig").Config;
 const memory_root = @import("memory/root.zig");
 

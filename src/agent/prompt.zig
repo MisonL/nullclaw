@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("../platform.zig");
 const tools_mod = @import("../tools/root.zig");
 const Tool = tools_mod.Tool;
 const skills_mod = @import("../skills.zig");
@@ -341,6 +342,9 @@ test "appendSkillsSection renders summary XML for always=false skill" {
         try f.writeAll("{\"name\": \"greeter\", \"version\": \"1.0.0\", \"description\": \"Greets the user\", \"author\": \"dev\"}");
     }
 
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -393,6 +397,9 @@ test "appendSkillsSection renders full instructions for always=true skill" {
         defer f.close();
         try f.writeAll("Always stage before committing.");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
@@ -459,6 +466,9 @@ test "appendSkillsSection renders mixed always=true and always=false" {
         try f.writeAll("{\"name\": \"lazy-skill\", \"description\": \"Lazy loader\"}");
     }
 
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -504,6 +514,9 @@ test "appendSkillsSection renders unavailable skill with missing deps" {
         try f.writeAll("{\"name\": \"docker-deploy\", \"description\": \"Deploy with docker\", \"requires_bins\": [\"nullclaw_fake_docker_xyz\"], \"requires_env\": [\"NULLCLAW_FAKE_TOKEN_XYZ\"]}");
     }
 
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
@@ -543,7 +556,7 @@ test "appendSkillsSection unavailable always=true skill renders in XML not full"
         else => return err,
     };
 
-    // always=true but requires nonexistent binary → should be unavailable
+    // always=true but requires nonexistent binary — should be unavailable
     {
         const f = try std.fs.createFileAbsolute(skill_json_path, .{});
         defer f.close();
@@ -554,6 +567,9 @@ test "appendSkillsSection unavailable always=true skill renders in XML not full"
         defer f.close();
         try f.writeAll("These instructions should NOT appear in prompt.");
     }
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);

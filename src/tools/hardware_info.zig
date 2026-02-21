@@ -48,12 +48,14 @@ const BOARD_DB = [_]BoardInfo{
 pub const HardwareBoardInfoTool = struct {
     boards: []const []const u8,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "hardware_board_info";
+    pub const tool_description = "Return board info (chip, architecture, memory map) for connected hardware. " ++
+        "Use for: 'board info', 'what board', 'connected hardware', 'chip info', 'memory map'.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"board":{"type":"string","description":"Board name (e.g. nucleo-f401re). If omitted, returns info for first configured board."}}}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *HardwareBoardInfoTool) Tool {
         return .{
@@ -62,27 +64,7 @@ pub const HardwareBoardInfoTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *HardwareBoardInfoTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "hardware_board_info";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Return board info (chip, architecture, memory map) for connected hardware. " ++
-            "Use for: 'board info', 'what board', 'connected hardware', 'chip info', 'memory map'.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"board":{"type":"string","description":"Board name (e.g. nucleo-f401re). If omitted, returns info for first configured board."}}}
-        ;
-    }
-
-    fn execute(self: *HardwareBoardInfoTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *HardwareBoardInfoTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         if (self.boards.len == 0) {
             return ToolResult.fail("No peripherals configured. Add boards to config.toml [peripherals.boards].");
         }

@@ -9,12 +9,13 @@ const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// CronRemove tool — removes a scheduled cron job by its ID.
 pub const CronRemoveTool = struct {
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "cron_remove";
+    pub const tool_description = "Remove a scheduled cron job by its ID.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"job_id":{"type":"string","description":"ID of the cron job to remove"}},"required":["job_id"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *CronRemoveTool) Tool {
         return .{
@@ -23,26 +24,7 @@ pub const CronRemoveTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *CronRemoveTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "cron_remove";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Remove a scheduled cron job by its ID.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"job_id":{"type":"string","description":"ID of the cron job to remove"}},"required":["job_id"]}
-        ;
-    }
-
-    fn execute(_: *CronRemoveTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(_: *CronRemoveTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const job_id = root.getString(args, "job_id") orelse
             return ToolResult.fail("Missing required parameter: job_id");
 

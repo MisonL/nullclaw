@@ -5,7 +5,7 @@
 //! Persisted to `~/.nullclaw/state.json` with atomic writes (temp + rename).
 
 const std = @import("std");
-const yc = @import("root.zig");
+const json_util = @import("json_util.zig");
 const Allocator = std.mem.Allocator;
 
 /// Runtime state persisted to disk.
@@ -89,14 +89,14 @@ pub const StateManager = struct {
         try buf.appendSlice(self.allocator, "{\n");
         if (channel) |ch| {
             try buf.appendSlice(self.allocator, "  \"last_channel\": ");
-            try yc.json_util.appendJsonString(&buf, self.allocator, ch);
+            try json_util.appendJsonString(&buf, self.allocator, ch);
             try buf.appendSlice(self.allocator, ",\n");
         } else {
             try buf.appendSlice(self.allocator, "  \"last_channel\": null,\n");
         }
         if (chat_id) |cid| {
             try buf.appendSlice(self.allocator, "  \"last_chat_id\": ");
-            try yc.json_util.appendJsonString(&buf, self.allocator, cid);
+            try json_util.appendJsonString(&buf, self.allocator, cid);
             try buf.appendSlice(self.allocator, ",\n");
         } else {
             try buf.appendSlice(self.allocator, "  \"last_chat_id\": null,\n");

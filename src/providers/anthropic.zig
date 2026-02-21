@@ -223,22 +223,22 @@ pub const AnthropicProvider = struct {
         const credential = self.credential orelse return error.CredentialsNotSet;
         const is_oauth = isSetupToken(credential);
 
-        // URL: append ?beta=true for OAuth tokens
+        // URL: stack-allocated (base_url + path is bounded)
+        var url_buf: [2048]u8 = undefined;
         const url = if (is_oauth)
-            try std.fmt.allocPrint(allocator, "{s}/v1/messages?beta=true", .{self.base_url})
+            std.fmt.bufPrint(&url_buf, "{s}/v1/messages?beta=true", .{self.base_url}) catch return error.AnthropicApiError
         else
-            try self.messagesUrl(allocator);
-        defer allocator.free(url);
+            std.fmt.bufPrint(&url_buf, "{s}/v1/messages", .{self.base_url}) catch return error.AnthropicApiError;
 
         const body = try buildSimpleRequestBody(allocator, system_prompt, message, model, temperature);
         defer allocator.free(body);
 
-        const auth = try authHeaderValue(allocator, credential);
-        defer if (auth.needs_free) allocator.free(auth.header_value);
-
-        // Build header strings for curl
+        // Build auth header directly on stack (avoids intermediate heap alloc)
         var auth_hdr_buf: [512]u8 = undefined;
-        const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "{s}: {s}", .{ auth.header_name, auth.header_value }) catch return error.AnthropicApiError;
+        const auth_hdr = if (is_oauth)
+            std.fmt.bufPrint(&auth_hdr_buf, "authorization: Bearer {s}", .{credential}) catch return error.AnthropicApiError
+        else
+            std.fmt.bufPrint(&auth_hdr_buf, "x-api-key: {s}", .{credential}) catch return error.AnthropicApiError;
 
         var version_hdr_buf: [64]u8 = undefined;
         const version_hdr = std.fmt.bufPrint(&version_hdr_buf, "anthropic-version: {s}", .{API_VERSION}) catch return error.AnthropicApiError;
@@ -264,22 +264,22 @@ pub const AnthropicProvider = struct {
         const credential = self.credential orelse return error.CredentialsNotSet;
         const is_oauth = isSetupToken(credential);
 
-        // URL: append ?beta=true for OAuth tokens
+        // URL: stack-allocated (base_url + path is bounded)
+        var url_buf: [2048]u8 = undefined;
         const url = if (is_oauth)
-            try std.fmt.allocPrint(allocator, "{s}/v1/messages?beta=true", .{self.base_url})
+            std.fmt.bufPrint(&url_buf, "{s}/v1/messages?beta=true", .{self.base_url}) catch return error.AnthropicApiError
         else
-            try self.messagesUrl(allocator);
-        defer allocator.free(url);
+            std.fmt.bufPrint(&url_buf, "{s}/v1/messages", .{self.base_url}) catch return error.AnthropicApiError;
 
         const body = try buildChatRequestBody(allocator, request, model, temperature);
         defer allocator.free(body);
 
-        const auth = try authHeaderValue(allocator, credential);
-        defer if (auth.needs_free) allocator.free(auth.header_value);
-
-        // Build header strings for curl
+        // Build auth header directly on stack (avoids intermediate heap alloc)
         var auth_hdr_buf: [512]u8 = undefined;
-        const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "{s}: {s}", .{ auth.header_name, auth.header_value }) catch return error.AnthropicApiError;
+        const auth_hdr = if (is_oauth)
+            std.fmt.bufPrint(&auth_hdr_buf, "authorization: Bearer {s}", .{credential}) catch return error.AnthropicApiError
+        else
+            std.fmt.bufPrint(&auth_hdr_buf, "x-api-key: {s}", .{credential}) catch return error.AnthropicApiError;
 
         var version_hdr_buf: [64]u8 = undefined;
         const version_hdr = std.fmt.bufPrint(&version_hdr_buf, "anthropic-version: {s}", .{API_VERSION}) catch return error.AnthropicApiError;
@@ -319,18 +319,19 @@ pub const AnthropicProvider = struct {
         const self: *AnthropicProvider = @ptrCast(@alignCast(ptr));
         const credential = self.credential orelse return error.CredentialsNotSet;
 
-        const url = try self.messagesUrl(allocator);
-        defer allocator.free(url);
+        var url_buf: [2048]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "{s}/v1/messages", .{self.base_url}) catch return error.AnthropicApiError;
 
         const body = try buildStreamingChatRequestBody(allocator, request, model, temperature);
         defer allocator.free(body);
 
-        const auth = try authHeaderValue(allocator, credential);
-        defer if (auth.needs_free) allocator.free(auth.header_value);
-
-        // Format auth header
+        // Build auth header directly on stack
+        const is_oauth = isSetupToken(credential);
         var auth_hdr_buf: [512]u8 = undefined;
-        const auth_hdr = std.fmt.bufPrint(&auth_hdr_buf, "{s}: {s}", .{ auth.header_name, auth.header_value }) catch return error.AnthropicApiError;
+        const auth_hdr = if (is_oauth)
+            std.fmt.bufPrint(&auth_hdr_buf, "authorization: Bearer {s}", .{credential}) catch return error.AnthropicApiError
+        else
+            std.fmt.bufPrint(&auth_hdr_buf, "x-api-key: {s}", .{credential}) catch return error.AnthropicApiError;
 
         var version_hdr_buf: [64]u8 = undefined;
         const version_hdr = std.fmt.bufPrint(&version_hdr_buf, "anthropic-version: {s}", .{API_VERSION}) catch return error.AnthropicApiError;
@@ -409,7 +410,7 @@ fn buildChatRequestBody(
     try buf.appendSlice(allocator, model);
     try buf.appendSlice(allocator, "\",\"max_tokens\":");
     var max_buf: [16]u8 = undefined;
-    const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{request.max_tokens}) catch return error.AnthropicApiError;
+    const max_str = std.fmt.bufPrint(&max_buf, "{d}", .{request.max_tokens orelse 4096}) catch return error.AnthropicApiError;
     try buf.appendSlice(allocator, max_str);
 
     if (system_prompt) |sys| {
@@ -475,7 +476,7 @@ fn buildStreamingChatRequestBody(
     try buf.appendSlice(allocator, model);
     try buf.appendSlice(allocator, "\",\"max_tokens\":");
     var max_buf2: [16]u8 = undefined;
-    const max_str = std.fmt.bufPrint(&max_buf2, "{d}", .{request.max_tokens}) catch return error.AnthropicApiError;
+    const max_str = std.fmt.bufPrint(&max_buf2, "{d}", .{request.max_tokens orelse 4096}) catch return error.AnthropicApiError;
     try buf.appendSlice(allocator, max_str);
 
     if (system_prompt) |sys| {

@@ -1,7 +1,8 @@
-//! Agent core — main loop, tool execution, conversation management.
+//! Agent core — struct definition, turn loop, tool execution.
 //!
-//! Mirrors ZeroClaw's agent module: Agent struct, tool call loop,
-//! system prompt construction, history management, single and interactive modes.
+//! Sub-modules: dispatcher.zig (tool call parsing), compaction.zig (history
+//! compaction/trimming), cli.zig (CLI entry point + REPL), prompt.zig
+//! (system prompt), memory_loader.zig (memory enrichment).
 
 const std = @import("std");
 const log = std.log.scoped(.agent);
@@ -9,24 +10,21 @@ const Config = @import("../config.zig").Config;
 const providers = @import("../providers/root.zig");
 const Provider = providers.Provider;
 const ChatMessage = providers.ChatMessage;
-const ChatRequest = providers.ChatRequest;
 const ChatResponse = providers.ChatResponse;
 const ToolSpec = providers.ToolSpec;
 const tools_mod = @import("../tools/root.zig");
 const Tool = tools_mod.Tool;
-const ToolResult = tools_mod.ToolResult;
 const memory_mod = @import("../memory/root.zig");
 const Memory = memory_mod.Memory;
-const MemoryCategory = memory_mod.MemoryCategory;
 const observability = @import("../observability.zig");
 const Observer = observability.Observer;
 const ObserverEvent = observability.ObserverEvent;
+const SecurityPolicy = @import("../security/policy.zig").SecurityPolicy;
 
 pub const dispatcher = @import("dispatcher.zig");
+pub const compaction = @import("compaction.zig");
 pub const prompt = @import("prompt.zig");
 pub const memory_loader = @import("memory_loader.zig");
-const cli_mod = @import("../channels/cli.zig");
-
 const ParsedToolCall = dispatcher.ParsedToolCall;
 const ToolExecutionResult = dispatcher.ToolExecutionResult;
 
@@ -35,28 +33,10 @@ const ToolExecutionResult = dispatcher.ToolExecutionResult;
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Maximum agentic tool-use iterations per user message.
-const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 10;
+const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 25;
 
 /// Maximum non-system messages before trimming.
 const DEFAULT_MAX_HISTORY: u32 = 50;
-
-/// Default: keep this many most-recent non-system messages after compaction.
-const DEFAULT_COMPACTION_KEEP_RECENT: u32 = 20;
-
-/// Default: max characters retained in stored compaction summary.
-const DEFAULT_COMPACTION_MAX_SUMMARY_CHARS: u32 = 2_000;
-
-/// Default: max characters in source transcript passed to the summarizer.
-const DEFAULT_COMPACTION_MAX_SOURCE_CHARS: u32 = 12_000;
-
-/// Default token limit for context window (used by token-based compaction trigger).
-pub const DEFAULT_TOKEN_LIMIT: u64 = 128_000;
-
-/// Minimum history length before context exhaustion recovery is attempted.
-const CONTEXT_RECOVERY_MIN_HISTORY: usize = 6;
-
-/// Number of recent messages to keep during force compression.
-const CONTEXT_RECOVERY_KEEP: usize = 4;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
@@ -77,11 +57,15 @@ pub const Agent = struct {
     max_history_messages: u32,
     auto_save: bool,
     token_limit: u64 = 0,
-    max_tokens: u32 = 4096,
+    max_tokens: ?u32 = null,
+    reasoning_effort: ?[]const u8 = null,
     message_timeout_secs: u64 = 0,
-    compaction_keep_recent: u32 = DEFAULT_COMPACTION_KEEP_RECENT,
-    compaction_max_summary_chars: u32 = DEFAULT_COMPACTION_MAX_SUMMARY_CHARS,
-    compaction_max_source_chars: u32 = DEFAULT_COMPACTION_MAX_SOURCE_CHARS,
+    compaction_keep_recent: u32 = compaction.DEFAULT_COMPACTION_KEEP_RECENT,
+    compaction_max_summary_chars: u32 = compaction.DEFAULT_COMPACTION_MAX_SUMMARY_CHARS,
+    compaction_max_source_chars: u32 = compaction.DEFAULT_COMPACTION_MAX_SOURCE_CHARS,
+
+    /// Optional security policy for autonomy checks and rate limiting.
+    policy: ?*const SecurityPolicy = null,
 
     /// Optional streaming callback. When set, turn() uses streamChat() for streaming providers.
     stream_callback: ?providers.StreamCallback = null,
@@ -104,11 +88,11 @@ pub const Agent = struct {
     context_was_compacted: bool = false,
 
     /// An owned copy of a ChatMessage, where content is heap-allocated.
-    const OwnedMessage = struct {
+    pub const OwnedMessage = struct {
         role: providers.Role,
         content: []const u8,
 
-        fn deinit(self: *const OwnedMessage, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *const OwnedMessage, allocator: std.mem.Allocator) void {
             allocator.free(self.content);
         }
 
@@ -151,6 +135,7 @@ pub const Agent = struct {
             .auto_save = cfg.memory.auto_save,
             .token_limit = cfg.agent.token_limit,
             .max_tokens = cfg.max_tokens,
+            .reasoning_effort = cfg.reasoning_effort,
             .message_timeout_secs = cfg.agent.message_timeout_secs,
             .compaction_keep_recent = cfg.agent.compaction_keep_recent,
             .compaction_max_summary_chars = cfg.agent.compaction_max_summary_chars,
@@ -171,197 +156,25 @@ pub const Agent = struct {
         self.allocator.free(self.tool_specs);
     }
 
-    /// Build a compaction transcript from a slice of history messages.
-    fn buildCompactionTranscript(self: *Agent, start: usize, end: usize) ![]u8 {
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(self.allocator);
-
-        for (self.history.items[start..end]) |*msg| {
-            const role_str: []const u8 = switch (msg.role) {
-                .system => "SYSTEM",
-                .user => "USER",
-                .assistant => "ASSISTANT",
-                .tool => "TOOL",
-            };
-            try buf.appendSlice(self.allocator, role_str);
-            try buf.appendSlice(self.allocator, ": ");
-            // Truncate very long messages in transcript
-            const content = if (msg.content.len > 500) msg.content[0..500] else msg.content;
-            try buf.appendSlice(self.allocator, content);
-            try buf.append(self.allocator, '\n');
-
-            // Safety cap
-            if (buf.items.len > self.compaction_max_source_chars) break;
-        }
-
-        if (buf.items.len > self.compaction_max_source_chars) {
-            buf.items.len = self.compaction_max_source_chars;
-        }
-
-        return buf.toOwnedSlice(self.allocator);
-    }
-
-    /// Estimate total tokens in conversation history using heuristic: (total_chars + 3) / 4.
+    /// Estimate total tokens in conversation history.
     pub fn tokenEstimate(self: *const Agent) u64 {
-        var total_chars: u64 = 0;
-        for (self.history.items) |*msg| {
-            total_chars += msg.content.len;
-        }
-        return (total_chars + 3) / 4;
+        return compaction.tokenEstimate(self.history.items);
     }
 
-    /// Summarize a slice of history messages via the LLM provider.
-    /// Returns an owned summary string. Falls back to transcript truncation on error.
-    fn summarizeSlice(self: *Agent, start: usize, end: usize) ![]u8 {
-        const transcript = try self.buildCompactionTranscript(start, end);
-        defer self.allocator.free(transcript);
-
-        const summarizer_system = "You are a conversation compaction engine. Summarize older chat history into concise context for future turns. Preserve: user preferences, commitments, decisions, unresolved tasks, key facts. Omit: filler, repeated chit-chat, verbose tool logs. Output plain text bullet points only.";
-        const summarizer_user = try std.fmt.allocPrint(self.allocator, "Summarize the following conversation history for context preservation. Keep it short (max 12 bullet points).\n\n{s}", .{transcript});
-        defer self.allocator.free(summarizer_user);
-
-        var summary_messages: [2]ChatMessage = .{
-            .{ .role = .system, .content = summarizer_system },
-            .{ .role = .user, .content = summarizer_user },
-        };
-
-        const messages_slice = summary_messages[0..2];
-
-        const summary_resp = self.provider.chat(
-            self.allocator,
-            .{
-                .messages = messages_slice,
-                .model = self.model_name,
-                .temperature = 0.2,
-                .tools = null,
-            },
-            self.model_name,
-            0.2,
-        ) catch {
-            // Fallback: use a local truncation of the transcript
-            const max_len = @min(transcript.len, self.compaction_max_summary_chars);
-            return try self.allocator.dupe(u8, transcript[0..max_len]);
-        };
-        // Free response's heap-allocated fields after extracting what we need
-        defer {
-            if (summary_resp.content) |c| {
-                if (c.len > 0) self.allocator.free(c);
-            }
-            if (summary_resp.model.len > 0) self.allocator.free(summary_resp.model);
-            if (summary_resp.reasoning_content) |rc| {
-                if (rc.len > 0) self.allocator.free(rc);
-            }
-        }
-
-        const raw_summary = summary_resp.contentOrEmpty();
-        const max_len = @min(raw_summary.len, self.compaction_max_summary_chars);
-        return try self.allocator.dupe(u8, raw_summary[0..max_len]);
-    }
-
-    /// Auto-compact history when it exceeds max_history_messages or when
-    /// estimated token usage exceeds 75% of the configured token limit.
-    /// For large histories (>10 messages to summarize), uses multi-part strategy:
-    /// splits into halves, summarizes each independently, then merges.
-    /// Returns true if compaction was performed.
+    /// Auto-compact history when it exceeds thresholds.
     pub fn autoCompactHistory(self: *Agent) !bool {
-        const has_system = self.history.items.len > 0 and self.history.items[0].role == .system;
-        const start: usize = if (has_system) 1 else 0;
-        const non_system_count = self.history.items.len - start;
-
-        // Trigger on message count exceeding threshold
-        const count_trigger = non_system_count > self.max_history_messages;
-
-        // Trigger on token estimate exceeding 75% of token limit
-        const token_threshold = (self.token_limit * 3) / 4;
-        const token_trigger = self.token_limit > 0 and self.tokenEstimate() > token_threshold;
-
-        if (!count_trigger and !token_trigger) return false;
-
-        const keep_recent = @min(self.compaction_keep_recent, @as(u32, @intCast(non_system_count)));
-        const compact_count = non_system_count - keep_recent;
-        if (compact_count == 0) return false;
-
-        const compact_end = start + compact_count;
-
-        // Multi-part strategy: if >10 messages to summarize, split into halves
-        const summary = if (compact_count > 10) blk: {
-            const mid = start + compact_count / 2;
-
-            // Summarize first half
-            const summary_a = try self.summarizeSlice(start, mid);
-            defer self.allocator.free(summary_a);
-
-            // Summarize second half
-            const summary_b = try self.summarizeSlice(mid, compact_end);
-            defer self.allocator.free(summary_b);
-
-            // Merge the two summaries
-            const merged = try std.fmt.allocPrint(
-                self.allocator,
-                "Earlier context:\n{s}\n\nMore recent context:\n{s}",
-                .{ summary_a, summary_b },
-            );
-
-            // Truncate if too long
-            if (merged.len > self.compaction_max_summary_chars) {
-                const truncated = try self.allocator.dupe(u8, merged[0..self.compaction_max_summary_chars]);
-                self.allocator.free(merged);
-                break :blk truncated;
-            }
-
-            break :blk merged;
-        } else try self.summarizeSlice(start, compact_end);
-        defer self.allocator.free(summary);
-
-        // Create the compaction summary message
-        const summary_content = try std.fmt.allocPrint(self.allocator, "[Compaction summary]\n{s}", .{summary});
-
-        // Free old messages being compacted
-        for (self.history.items[start..compact_end]) |*msg| {
-            msg.deinit(self.allocator);
-        }
-
-        // Replace compacted messages with summary
-        self.history.items[start] = .{
-            .role = .assistant,
-            .content = summary_content,
-        };
-
-        // Shift remaining messages
-        if (compact_end > start + 1) {
-            const src = self.history.items[compact_end..];
-            std.mem.copyForwards(OwnedMessage, self.history.items[start + 1 ..], src);
-            self.history.items.len -= (compact_end - start - 1);
-        }
-
-        return true;
+        return compaction.autoCompactHistory(self.allocator, &self.history, self.provider, self.model_name, .{
+            .keep_recent = self.compaction_keep_recent,
+            .max_summary_chars = self.compaction_max_summary_chars,
+            .max_source_chars = self.compaction_max_source_chars,
+            .token_limit = self.token_limit,
+            .max_history_messages = self.max_history_messages,
+        });
     }
 
     /// Force-compress history for context exhaustion recovery.
-    /// Keeps system prompt (if any) + last CONTEXT_RECOVERY_KEEP messages.
-    /// Everything in between is dropped without LLM summarization (we can't call
-    /// the LLM since the context is exhausted). Returns true if compression was performed.
     pub fn forceCompressHistory(self: *Agent) bool {
-        const has_system = self.history.items.len > 0 and self.history.items[0].role == .system;
-        const start: usize = if (has_system) 1 else 0;
-        const non_system_count = self.history.items.len - start;
-
-        if (non_system_count <= CONTEXT_RECOVERY_KEEP) return false;
-
-        const keep_start = self.history.items.len - CONTEXT_RECOVERY_KEEP;
-        const to_remove = keep_start - start;
-
-        // Free messages being removed
-        for (self.history.items[start..keep_start]) |*msg| {
-            msg.deinit(self.allocator);
-        }
-
-        // Shift remaining elements
-        const src = self.history.items[keep_start..];
-        std.mem.copyForwards(OwnedMessage, self.history.items[start..], src);
-        self.history.items.len -= to_remove;
-
-        return true;
+        return compaction.forceCompressHistory(self.allocator, &self.history);
     }
 
     /// Handle slash commands that don't require LLM.
@@ -371,6 +184,12 @@ pub const Agent = struct {
 
         if (std.mem.eql(u8, trimmed, "/new")) {
             self.clearHistory();
+            // Clear stale auto-saved memories to prevent re-injection
+            if (self.mem) |mem| {
+                if (mem.asSqlite()) |sqlite_mem| {
+                    sqlite_mem.clearAutoSaved() catch {};
+                }
+            }
             return try self.allocator.dupe(u8, "Session cleared.");
         }
 
@@ -514,6 +333,7 @@ pub const Agent = struct {
                         .max_tokens = self.max_tokens,
                         .tools = null,
                         .timeout_secs = self.message_timeout_secs,
+                        .reasoning_effort = self.reasoning_effort,
                     },
                     self.model_name,
                     self.temperature,
@@ -547,6 +367,7 @@ pub const Agent = struct {
                         .max_tokens = self.max_tokens,
                         .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                         .timeout_secs = self.message_timeout_secs,
+                        .reasoning_effort = self.reasoning_effort,
                     },
                     self.model_name,
                     self.temperature,
@@ -565,7 +386,7 @@ pub const Agent = struct {
                     // Context exhaustion: compact immediately before first retry
                     const err_name = @errorName(err);
                     if (providers.reliable.isContextExhausted(err_name) and
-                        self.history.items.len > CONTEXT_RECOVERY_MIN_HISTORY and
+                        self.history.items.len > compaction.CONTEXT_RECOVERY_MIN_HISTORY and
                         self.forceCompressHistory())
                     {
                         self.context_was_compacted = true;
@@ -580,6 +401,7 @@ pub const Agent = struct {
                                 .max_tokens = self.max_tokens,
                                 .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                                 .timeout_secs = self.message_timeout_secs,
+                                .reasoning_effort = self.reasoning_effort,
                             },
                             self.model_name,
                             self.temperature,
@@ -597,13 +419,14 @@ pub const Agent = struct {
                             .max_tokens = self.max_tokens,
                             .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                             .timeout_secs = self.message_timeout_secs,
+                            .reasoning_effort = self.reasoning_effort,
                         },
                         self.model_name,
                         self.temperature,
                     ) catch |retry_err| {
                         // Context exhaustion recovery: if we have enough history,
                         // force-compress and retry once more
-                        if (self.history.items.len > CONTEXT_RECOVERY_MIN_HISTORY and self.forceCompressHistory()) {
+                        if (self.history.items.len > compaction.CONTEXT_RECOVERY_MIN_HISTORY and self.forceCompressHistory()) {
                             self.context_was_compacted = true;
                             const recovery_msgs = self.buildMessageSlice() catch return retry_err;
                             defer self.allocator.free(recovery_msgs);
@@ -616,6 +439,7 @@ pub const Agent = struct {
                                     .max_tokens = self.max_tokens,
                                     .tools = if (self.provider.supportsNativeTools()) self.tool_specs else null,
                                     .timeout_secs = self.message_timeout_secs,
+                                    .reasoning_effort = self.reasoning_effort,
                                 },
                                 self.model_name,
                                 self.temperature,
@@ -684,7 +508,7 @@ pub const Agent = struct {
                 }
 
                 // Build history content with serialized tool calls
-                assistant_history_content = try buildAssistantHistoryWithToolCalls(
+                assistant_history_content = try dispatcher.buildAssistantHistoryWithToolCalls(
                     self.allocator,
                     response_text,
                     parsed_calls,
@@ -708,7 +532,7 @@ pub const Agent = struct {
                 // No tool calls — final response
                 const final_text = if (self.context_was_compacted) blk: {
                     self.context_was_compacted = false;
-                    break :blk try std.fmt.allocPrint(self.allocator, "[Контекст сжат]\n\n{s}", .{display_text});
+                    break :blk try std.fmt.allocPrint(self.allocator, "[Context compacted]\n\n{s}", .{display_text});
                 } else try self.allocator.dupe(u8, display_text);
 
                 // Dupe from display_text directly (not from final_text) to avoid double-dupe
@@ -808,12 +632,95 @@ pub const Agent = struct {
             self.freeResponseFields(&response);
         }
 
-        return error.MaxToolIterationsExceeded;
+        // ── Graceful degradation: tool iterations exhausted ──────────
+        // Instead of returning an error, ask the LLM to summarize what it
+        // has accomplished so far and return that as the final response.
+        const exhausted_event = ObserverEvent{ .tool_iterations_exhausted = .{ .iterations = self.max_tool_iterations } };
+        self.observer.recordEvent(&exhausted_event);
+        log.warn("Tool iterations exhausted ({d}/{d}), requesting summary", .{ self.max_tool_iterations, self.max_tool_iterations });
+
+        // Append a pseudo-user message forcing a text-only summary
+        try self.history.append(self.allocator, .{
+            .role = .user,
+            .content = try self.allocator.dupe(u8, "SYSTEM: You have reached the maximum number of tool iterations. " ++
+                "You MUST NOT call any more tools. Summarize what you have accomplished " ++
+                "so far and what remains to be done. Respond in the same language the user used."),
+        });
+
+        // Build messages for the summary call
+        const summary_messages = self.buildMessageSlice() catch {
+            const fallback = try std.fmt.allocPrint(self.allocator, "[Tool iteration limit: {d}/{d}] Could not produce a summary. Try /new and repeat your request.", .{ self.max_tool_iterations, self.max_tool_iterations });
+            const complete_event = ObserverEvent{ .turn_complete = {} };
+            self.observer.recordEvent(&complete_event);
+            return fallback;
+        };
+        defer self.allocator.free(summary_messages);
+
+        var summary_response = self.provider.chat(
+            self.allocator,
+            .{
+                .messages = summary_messages,
+                .model = self.model_name,
+                .temperature = self.temperature,
+                .max_tokens = self.max_tokens,
+                .tools = null, // force text-only
+                .timeout_secs = self.message_timeout_secs,
+                .reasoning_effort = self.reasoning_effort,
+            },
+            self.model_name,
+            self.temperature,
+        ) catch {
+            const fallback = try std.fmt.allocPrint(self.allocator, "[Tool iteration limit: {d}/{d}] Could not produce a summary. Try /new and repeat your request.", .{ self.max_tool_iterations, self.max_tool_iterations });
+            const complete_event = ObserverEvent{ .turn_complete = {} };
+            self.observer.recordEvent(&complete_event);
+            return fallback;
+        };
+        defer self.freeResponseFields(&summary_response);
+
+        const summary_text = summary_response.contentOrEmpty();
+        const prefixed = try std.fmt.allocPrint(self.allocator, "[Tool iteration limit: {d}/{d}]\n\n{s}", .{ self.max_tool_iterations, self.max_tool_iterations, summary_text });
+        errdefer self.allocator.free(prefixed);
+
+        // Store in history (dupe the raw summary, not the prefixed version)
+        try self.history.append(self.allocator, .{
+            .role = .assistant,
+            .content = try self.allocator.dupe(u8, summary_text),
+        });
+
+        // Compact/trim history so the next turn doesn't start with bloated context
+        self.last_turn_compacted = self.autoCompactHistory() catch false;
+        self.trimHistory();
+
+        const complete_event = ObserverEvent{ .turn_complete = {} };
+        self.observer.recordEvent(&complete_event);
+
+        return prefixed;
     }
 
     /// Execute a tool by name lookup.
     /// Parses arguments_json once into a std.json.ObjectMap and passes it to the tool.
     fn executeTool(self: *Agent, call: ParsedToolCall) ToolExecutionResult {
+        // Policy gate: check autonomy and rate limit
+        if (self.policy) |pol| {
+            if (!pol.canAct()) {
+                return .{
+                    .name = call.name,
+                    .output = "Action blocked: agent is in read-only mode",
+                    .success = false,
+                    .tool_call_id = call.tool_call_id,
+                };
+            }
+            const allowed = pol.recordAction() catch true;
+            if (!allowed) {
+                return .{
+                    .name = call.name,
+                    .output = "Rate limit exceeded",
+                    .success = false,
+                    .tool_call_id = call.tool_call_id,
+                };
+            }
+        }
+
         for (self.tools) |t| {
             if (std.mem.eql(u8, t.name(), call.name)) {
                 // Parse arguments JSON to ObjectMap ONCE
@@ -869,39 +776,6 @@ pub const Agent = struct {
         };
     }
 
-    /// Build an assistant history entry that includes serialized tool calls as XML.
-    ///
-    /// When the provider returns structured tool_calls, we serialize them as
-    /// `<tool_call>` XML tags so the conversation history stays in a canonical
-    /// format regardless of whether tools came from native API or XML parsing.
-    ///
-    /// Mirrors ZeroClaw's `build_assistant_history_with_tool_calls`.
-    pub fn buildAssistantHistoryWithToolCalls(
-        allocator: std.mem.Allocator,
-        response_text: []const u8,
-        parsed_calls: []const ParsedToolCall,
-    ) ![]const u8 {
-        var buf: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer buf.deinit(allocator);
-        const w = buf.writer(allocator);
-
-        if (response_text.len > 0) {
-            try w.writeAll(response_text);
-            try w.writeByte('\n');
-        }
-
-        for (parsed_calls) |call| {
-            try w.writeAll("<tool_call>\n");
-            try std.fmt.format(w, "{{\"name\": \"{s}\", \"arguments\": {s}}}", .{
-                call.name,
-                call.arguments_json,
-            });
-            try w.writeAll("\n</tool_call>\n");
-        }
-
-        return buf.toOwnedSlice(allocator);
-    }
-
     /// Build a flat ChatMessage slice from owned history.
     fn buildMessageSlice(self: *Agent) ![]ChatMessage {
         const messages = try self.allocator.alloc(ChatMessage, self.history.items.len);
@@ -936,32 +810,8 @@ pub const Agent = struct {
     }
 
     /// Trim history to prevent unbounded growth.
-    /// Preserves the system prompt (first message) and the most recent messages.
     fn trimHistory(self: *Agent) void {
-        const max = self.max_history_messages;
-        if (self.history.items.len <= max + 1) return; // +1 for system prompt
-
-        const has_system = self.history.items.len > 0 and self.history.items[0].role == .system;
-        const start: usize = if (has_system) 1 else 0;
-        const non_system_count = self.history.items.len - start;
-
-        if (non_system_count <= max) return;
-
-        const to_remove = non_system_count - max;
-        // Free the messages being removed
-        for (self.history.items[start .. start + to_remove]) |*msg| {
-            msg.deinit(self.allocator);
-        }
-
-        // Shift remaining elements
-        const src = self.history.items[start + to_remove ..];
-        std.mem.copyForwards(OwnedMessage, self.history.items[start..], src);
-        self.history.items.len -= to_remove;
-
-        // Shrink backing array if capacity is much larger than needed
-        if (self.history.capacity > self.history.items.len * 2 + 8) {
-            self.history.shrinkAndFree(self.allocator, self.history.items.len);
-        }
+        compaction.trimHistory(self.allocator, &self.history, self.max_history_messages);
     }
 
     /// Run a single message through the agent and return the response.
@@ -1026,9 +876,7 @@ pub const Agent = struct {
     }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Top-level run() — entry point for CLI
-// ═══════════════════════════════════════════════════════════════════════════
+pub const cli = @import("cli.zig");
 
 /// Streaming callback that writes chunks directly to stdout.
 fn cliStreamCallback(_: *anyopaque, chunk: providers.StreamChunk) void {
@@ -1432,12 +1280,24 @@ test "Agent clear history" {
 }
 
 test "dispatcher module reexport" {
-    // Verify dispatcher types are accessible
     _ = dispatcher.ParsedToolCall;
     _ = dispatcher.ToolExecutionResult;
     _ = dispatcher.parseToolCalls;
     _ = dispatcher.formatToolResults;
     _ = dispatcher.buildToolInstructions;
+    _ = dispatcher.buildAssistantHistoryWithToolCalls;
+}
+
+test "compaction module reexport" {
+    _ = compaction.tokenEstimate;
+    _ = compaction.autoCompactHistory;
+    _ = compaction.forceCompressHistory;
+    _ = compaction.trimHistory;
+    _ = compaction.CompactionConfig;
+}
+
+test "cli module reexport" {
+    _ = cli.run;
 }
 
 test "prompt module reexport" {
@@ -1452,6 +1312,8 @@ test "memory_loader module reexport" {
 
 test {
     _ = dispatcher;
+    _ = compaction;
+    _ = cli;
     _ = prompt;
     _ = memory_loader;
 }
@@ -1689,7 +1551,7 @@ test "Agent buildMessageSlice" {
 }
 
 test "Agent max_tool_iterations default" {
-    try std.testing.expectEqual(@as(u32, 10), DEFAULT_MAX_TOOL_ITERATIONS);
+    try std.testing.expectEqual(@as(u32, 25), DEFAULT_MAX_TOOL_ITERATIONS);
 }
 
 test "Agent max_history default" {
@@ -1773,172 +1635,6 @@ test "Agent clearHistory then add messages" {
     });
     try std.testing.expectEqual(@as(usize, 1), agent.historyLen());
     try std.testing.expectEqualStrings("new", agent.history.items[0].content);
-}
-
-// ── buildAssistantHistoryWithToolCalls tests ─────────────────────
-
-test "buildAssistantHistoryWithToolCalls with text and calls" {
-    const allocator = std.testing.allocator;
-    const calls = [_]ParsedToolCall{
-        .{ .name = "shell", .arguments_json = "{\"command\":\"ls\"}" },
-        .{ .name = "file_read", .arguments_json = "{\"path\":\"a.txt\"}" },
-    };
-    const result = try Agent.buildAssistantHistoryWithToolCalls(
-        allocator,
-        "Let me check that.",
-        &calls,
-    );
-    defer allocator.free(result);
-
-    // Should contain the response text
-    try std.testing.expect(std.mem.indexOf(u8, result, "Let me check that.") != null);
-    // Should contain tool_call XML tags
-    try std.testing.expect(std.mem.indexOf(u8, result, "<tool_call>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "</tool_call>") != null);
-    // Should contain tool names
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"shell\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"file_read\"") != null);
-    // Should contain two tool_call tags
-    var count: usize = 0;
-    var search = result;
-    while (std.mem.indexOf(u8, search, "<tool_call>")) |idx| {
-        count += 1;
-        search = search[idx + 11 ..];
-    }
-    try std.testing.expectEqual(@as(usize, 2), count);
-}
-
-test "buildAssistantHistoryWithToolCalls empty text" {
-    const allocator = std.testing.allocator;
-    const calls = [_]ParsedToolCall{
-        .{ .name = "shell", .arguments_json = "{}" },
-    };
-    const result = try Agent.buildAssistantHistoryWithToolCalls(
-        allocator,
-        "",
-        &calls,
-    );
-    defer allocator.free(result);
-
-    // Should NOT start with a newline (no empty text prefix)
-    try std.testing.expect(result[0] == '<');
-    try std.testing.expect(std.mem.indexOf(u8, result, "<tool_call>") != null);
-}
-
-test "buildAssistantHistoryWithToolCalls no calls" {
-    const allocator = std.testing.allocator;
-    const result = try Agent.buildAssistantHistoryWithToolCalls(
-        allocator,
-        "Just text, no tools.",
-        &.{},
-    );
-    defer allocator.free(result);
-
-    try std.testing.expectEqualStrings("Just text, no tools.\n", result);
-}
-
-test "buildAssistantHistoryWithToolCalls empty text and no calls" {
-    const allocator = std.testing.allocator;
-    const result = try Agent.buildAssistantHistoryWithToolCalls(
-        allocator,
-        "",
-        &.{},
-    );
-    defer allocator.free(result);
-
-    try std.testing.expectEqualStrings("", result);
-}
-
-test "buildAssistantHistoryWithToolCalls preserves arguments JSON" {
-    const allocator = std.testing.allocator;
-    const calls = [_]ParsedToolCall{
-        .{ .name = "file_write", .arguments_json = "{\"path\":\"test.py\",\"content\":\"print('hello')\"}" },
-    };
-    const result = try Agent.buildAssistantHistoryWithToolCalls(
-        allocator,
-        "",
-        &calls,
-    );
-    defer allocator.free(result);
-
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"file_write\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "print('hello')") != null);
-}
-
-// ── parseStructuredToolCalls tests ──────────────────────────────
-
-test "parseStructuredToolCalls converts ToolCalls to ParsedToolCalls" {
-    const allocator = std.testing.allocator;
-    const tool_calls = [_]providers.ToolCall{
-        .{ .id = "call_1", .name = "shell", .arguments = "{\"command\":\"ls\"}" },
-        .{ .id = "call_2", .name = "file_read", .arguments = "{\"path\":\"a.txt\"}" },
-    };
-
-    const result = try dispatcher.parseStructuredToolCalls(allocator, &tool_calls);
-    defer {
-        for (result) |call| {
-            allocator.free(call.name);
-            allocator.free(call.arguments_json);
-            if (call.tool_call_id) |id| allocator.free(id);
-        }
-        allocator.free(result);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), result.len);
-    try std.testing.expectEqualStrings("shell", result[0].name);
-    try std.testing.expectEqualStrings("{\"command\":\"ls\"}", result[0].arguments_json);
-    try std.testing.expectEqualStrings("call_1", result[0].tool_call_id.?);
-    try std.testing.expectEqualStrings("file_read", result[1].name);
-    try std.testing.expectEqualStrings("call_2", result[1].tool_call_id.?);
-}
-
-test "parseStructuredToolCalls skips empty names" {
-    const allocator = std.testing.allocator;
-    const tool_calls = [_]providers.ToolCall{
-        .{ .id = "tc1", .name = "", .arguments = "{}" },
-        .{ .id = "tc2", .name = "shell", .arguments = "{}" },
-    };
-
-    const result = try dispatcher.parseStructuredToolCalls(allocator, &tool_calls);
-    defer {
-        for (result) |call| {
-            allocator.free(call.name);
-            allocator.free(call.arguments_json);
-            if (call.tool_call_id) |id| allocator.free(id);
-        }
-        allocator.free(result);
-    }
-
-    try std.testing.expectEqual(@as(usize, 1), result.len);
-    try std.testing.expectEqualStrings("shell", result[0].name);
-}
-
-test "parseStructuredToolCalls empty input" {
-    const allocator = std.testing.allocator;
-    const result = try dispatcher.parseStructuredToolCalls(allocator, &.{});
-    defer allocator.free(result);
-
-    try std.testing.expectEqual(@as(usize, 0), result.len);
-}
-
-test "parseStructuredToolCalls empty id yields null tool_call_id" {
-    const allocator = std.testing.allocator;
-    const tool_calls = [_]providers.ToolCall{
-        .{ .id = "", .name = "shell", .arguments = "{}" },
-    };
-
-    const result = try dispatcher.parseStructuredToolCalls(allocator, &tool_calls);
-    defer {
-        for (result) |call| {
-            allocator.free(call.name);
-            allocator.free(call.arguments_json);
-            if (call.tool_call_id) |id| allocator.free(id);
-        }
-        allocator.free(result);
-    }
-
-    try std.testing.expectEqual(@as(usize, 1), result.len);
-    try std.testing.expect(result[0].tool_call_id == null);
 }
 
 // ── Slash Command Tests ──────────────────────────────────────────
@@ -2058,158 +1754,6 @@ test "slash command with whitespace" {
     try std.testing.expect(std.mem.indexOf(u8, response, "/new") != null);
 }
 
-// ── Session Consolidation Enhancement Tests ─────────────────────
-
-test "tokenEstimate empty history" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    // Empty history: (0 + 3) / 4 = 0
-    try std.testing.expectEqual(@as(u64, 0), agent.tokenEstimate());
-}
-
-test "tokenEstimate with messages" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    // Add messages with known content lengths
-    // "hello" = 5 chars, "world" = 5 chars => total 10 chars => (10 + 3) / 4 = 3
-    try agent.history.append(allocator, .{
-        .role = .user,
-        .content = try allocator.dupe(u8, "hello"),
-    });
-    try agent.history.append(allocator, .{
-        .role = .assistant,
-        .content = try allocator.dupe(u8, "world"),
-    });
-
-    try std.testing.expectEqual(@as(u64, 3), agent.tokenEstimate());
-}
-
-test "tokenEstimate heuristic accuracy" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    // 400 chars should estimate ~100 tokens
-    const content = try allocator.alloc(u8, 400);
-    defer allocator.free(content);
-    @memset(content, 'a');
-
-    try agent.history.append(allocator, .{
-        .role = .user,
-        .content = try allocator.dupe(u8, content),
-    });
-
-    // (400 + 3) / 4 = 100
-    try std.testing.expectEqual(@as(u64, 100), agent.tokenEstimate());
-}
-
-test "autoCompactHistory no-op below count and token thresholds" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    agent.token_limit = DEFAULT_TOKEN_LIMIT;
-
-    // Add a few small messages — well below both thresholds
-    try agent.history.append(allocator, .{
-        .role = .system,
-        .content = try allocator.dupe(u8, "system"),
-    });
-    try agent.history.append(allocator, .{
-        .role = .user,
-        .content = try allocator.dupe(u8, "hello"),
-    });
-
-    const compacted = try agent.autoCompactHistory();
-    try std.testing.expect(!compacted);
-    try std.testing.expectEqual(@as(usize, 2), agent.historyLen());
-}
-
-test "DEFAULT_TOKEN_LIMIT constant" {
-    try std.testing.expectEqual(@as(u64, 128_000), DEFAULT_TOKEN_LIMIT);
-}
-
-// ── Context Exhaustion Recovery Tests ────────────────────────────
-
-test "forceCompressHistory keeps system + last 4 messages" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    // Add system prompt + 8 messages
-    try agent.history.append(allocator, .{
-        .role = .system,
-        .content = try allocator.dupe(u8, "system prompt"),
-    });
-    for (0..8) |i| {
-        try agent.history.append(allocator, .{
-            .role = .user,
-            .content = try std.fmt.allocPrint(allocator, "msg-{d}", .{i}),
-        });
-    }
-    try std.testing.expectEqual(@as(usize, 9), agent.historyLen());
-
-    const compressed = agent.forceCompressHistory();
-    try std.testing.expect(compressed);
-
-    // Should keep system + last 4
-    try std.testing.expectEqual(@as(usize, 5), agent.historyLen());
-    try std.testing.expect(agent.history.items[0].role == .system);
-    try std.testing.expectEqualStrings("system prompt", agent.history.items[0].content);
-    try std.testing.expectEqualStrings("msg-4", agent.history.items[1].content);
-    try std.testing.expectEqualStrings("msg-7", agent.history.items[4].content);
-}
-
-test "forceCompressHistory without system prompt" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    // Add 8 messages (no system prompt)
-    for (0..8) |i| {
-        try agent.history.append(allocator, .{
-            .role = .user,
-            .content = try std.fmt.allocPrint(allocator, "msg-{d}", .{i}),
-        });
-    }
-
-    const compressed = agent.forceCompressHistory();
-    try std.testing.expect(compressed);
-
-    // Should keep last 4
-    try std.testing.expectEqual(@as(usize, 4), agent.historyLen());
-    try std.testing.expectEqualStrings("msg-4", agent.history.items[0].content);
-    try std.testing.expectEqualStrings("msg-7", agent.history.items[3].content);
-}
-
-test "forceCompressHistory no-op when history is small" {
-    const allocator = std.testing.allocator;
-    var agent = try makeTestAgent(allocator);
-    defer agent.deinit();
-
-    try agent.history.append(allocator, .{
-        .role = .system,
-        .content = try allocator.dupe(u8, "sys"),
-    });
-    try agent.history.append(allocator, .{
-        .role = .user,
-        .content = try allocator.dupe(u8, "hello"),
-    });
-
-    const compressed = agent.forceCompressHistory();
-    try std.testing.expect(!compressed);
-    try std.testing.expectEqual(@as(usize, 2), agent.historyLen());
-}
-
-test "CONTEXT_RECOVERY constants" {
-    try std.testing.expectEqual(@as(usize, 6), CONTEXT_RECOVERY_MIN_HISTORY);
-    try std.testing.expectEqual(@as(usize, 4), CONTEXT_RECOVERY_KEEP);
-}
-
 test "Agent streaming fields default to null" {
     const allocator = std.testing.allocator;
     var noop = observability.NoopObserver{};
@@ -2231,18 +1775,6 @@ test "Agent streaming fields default to null" {
 
     try std.testing.expect(agent.stream_callback == null);
     try std.testing.expect(agent.stream_ctx == null);
-}
-
-test "cliStreamCallback handles empty delta" {
-    const chunk = providers.StreamChunk.finalChunk();
-    cliStreamCallback(undefined, chunk);
-}
-
-test "cliStreamCallback text delta chunk" {
-    const chunk = providers.StreamChunk.textDelta("hello");
-    try std.testing.expectEqualStrings("hello", chunk.delta);
-    try std.testing.expect(!chunk.is_final);
-    try std.testing.expectEqual(@as(u32, 2), chunk.token_count);
 }
 
 // ── Bug regression tests ─────────────────────────────────────────
@@ -2297,7 +1829,10 @@ test "Agent streaming fields can be set" {
     defer agent.deinit();
 
     var ctx: u8 = 42;
-    agent.stream_callback = cliStreamCallback;
+    const test_cb: providers.StreamCallback = struct {
+        fn cb(_: *anyopaque, _: providers.StreamChunk) void {}
+    }.cb;
+    agent.stream_callback = test_cb;
     agent.stream_ctx = @ptrCast(&ctx);
 
     try std.testing.expect(agent.stream_callback != null);

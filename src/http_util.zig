@@ -89,11 +89,6 @@ pub fn curlPost(allocator: Allocator, url: []const u8, body: []const u8, headers
     return curlPostWithProxy(allocator, url, body, headers, null, null);
 }
 
-/// HTTP POST via curl subprocess with no extra headers.
-pub fn curlPostSimple(allocator: Allocator, url: []const u8, body: []const u8) ![]u8 {
-    return curlPost(allocator, url, body, &.{});
-}
-
 /// HTTP GET via curl subprocess with optional proxy.
 ///
 /// `headers` is a slice of header strings (e.g. `"Authorization: Bearer xxx"`).

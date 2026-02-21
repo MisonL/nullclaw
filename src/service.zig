@@ -271,7 +271,7 @@ fn getHomeDir(allocator: std.mem.Allocator) ![]u8 {
     return std.fs.path.join(allocator, &.{ drive, path });
 }
 
-fn macosServiceFile(allocator: std.mem.Allocator) ![]u8 {
+fn macosServiceFile(allocator: std.mem.Allocator) ![]const u8 {
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
     const dir = try std.fs.path.join(allocator, &.{ home, "Library", "LaunchAgents" });
@@ -279,7 +279,7 @@ fn macosServiceFile(allocator: std.mem.Allocator) ![]u8 {
     return std.fs.path.join(allocator, &.{ dir, SERVICE_LABEL ++ ".plist" });
 }
 
-fn linuxServiceFile(allocator: std.mem.Allocator) ![]u8 {
+fn linuxServiceFile(allocator: std.mem.Allocator) ![]const u8 {
     const home = try getHomeDir(allocator);
     defer allocator.free(home);
     return std.fs.path.join(allocator, &.{ home, ".config", "systemd", "user", "nullclaw.service" });

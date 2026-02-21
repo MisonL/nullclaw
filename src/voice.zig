@@ -6,7 +6,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const root = @import("root.zig");
+const platform = @import("platform.zig");
+const json_util = @import("json_util.zig");
+const http_util = @import("http_util.zig");
 
 const log = std.log.scoped(.voice);
 
@@ -395,10 +397,10 @@ fn getFilePath(allocator: std.mem.Allocator, bot_token: []const u8, file_id: []c
     var body_list: std.ArrayListUnmanaged(u8) = .empty;
     defer body_list.deinit(allocator);
     try body_list.appendSlice(allocator, "{\"file_id\":");
-    try root.json_util.appendJsonString(&body_list, allocator, file_id);
+    try json_util.appendJsonString(&body_list, allocator, file_id);
     try body_list.appendSlice(allocator, "}");
 
-    const resp = try root.http_util.curlPost(allocator, url, body_list.items, &.{});
+    const resp = try http_util.curlPost(allocator, url, body_list.items, &.{});
     defer allocator.free(resp);
 
     // Parse response
@@ -420,7 +422,7 @@ fn downloadTelegramFile(allocator: std.mem.Allocator, bot_token: []const u8, tg_
     try fbs.writer().print("https://api.telegram.org/file/bot{s}/{s}", .{ bot_token, tg_file_path });
     const url = fbs.getWritten();
 
-    const data = try root.http_util.curlGet(allocator, url, &.{}, "30");
+    const data = try http_util.curlGet(allocator, url, &.{}, "30");
     defer allocator.free(data);
 
     // Save to temp file
@@ -522,10 +524,10 @@ test "voice parseTranscriptionText valid" {
 
 test "voice parseTranscriptionText unicode" {
     const allocator = std.testing.allocator;
-    const json = "{\"text\":\"Привет мир\"}";
+    const json = "{\"text\":\"Héllo wörld\"}";
     const text = try parseTranscriptionText(allocator, json);
     defer allocator.free(text);
-    try std.testing.expectEqualStrings("Привет мир", text);
+    try std.testing.expectEqualStrings("Héllo wörld", text);
 }
 
 test "voice parseTranscriptionText missing field" {

@@ -6,6 +6,7 @@
 //! - Device Authorization Grant flow (RFC 8628)
 
 const std = @import("std");
+const platform = @import("platform.zig");
 const json_util = @import("json_util.zig");
 
 // ── PKCE (RFC 7636) ────────────────────────────────────────────────────
@@ -127,18 +128,34 @@ pub fn saveCredential(allocator: std.mem.Allocator, provider: []const u8, token:
         existing.deinit();
     }
 
-    // Upsert provider entry
+    // Upsert provider entry.
+    // After put() succeeds, the map owns these allocations and the defer
+    // block above handles cleanup.  The flag prevents errdefer double-frees
+    // if a subsequent try (serialization / file I/O) fails.
+    var put_succeeded = false;
     const key_owned = try allocator.dupe(u8, provider);
+    errdefer if (!put_succeeded) allocator.free(key_owned);
     if (existing.fetchSwapRemove(key_owned)) |old| {
         allocator.free(old.key);
         freeStoredToken(allocator, old.value);
     }
+    const at_owned = try allocator.dupe(u8, token.access_token);
+    errdefer if (!put_succeeded) allocator.free(at_owned);
+    const rt_owned: ?[]const u8 = if (token.refresh_token) |rt| try allocator.dupe(u8, rt) else null;
+    errdefer {
+        if (!put_succeeded) {
+            if (rt_owned) |rt| allocator.free(rt);
+        }
+    }
+    const tt_owned = try allocator.dupe(u8, token.token_type);
+    errdefer if (!put_succeeded) allocator.free(tt_owned);
     try existing.put(key_owned, .{
-        .access_token = try allocator.dupe(u8, token.access_token),
-        .refresh_token = if (token.refresh_token) |rt| try allocator.dupe(u8, rt) else null,
+        .access_token = at_owned,
+        .refresh_token = rt_owned,
         .expires_at = token.expires_at,
-        .token_type = try allocator.dupe(u8, token.token_type),
+        .token_type = tt_owned,
     });
+    put_succeeded = true;
 
     // Serialize
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -327,6 +344,121 @@ fn loadAllCredentials(allocator: std.mem.Allocator, file_path: []const u8) ?std.
     return map;
 }
 
+// ── Token Refresh ─────────────────────────────────────────────────────
+
+/// Refresh an OAuth access token using a refresh_token grant.
+/// Preserves the old refresh_token if the response omits a new one.
+pub fn refreshAccessToken(
+    allocator: std.mem.Allocator,
+    token_url: []const u8,
+    client_id: []const u8,
+    refresh_token: []const u8,
+) !OAuthToken {
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    const payload = try std.fmt.allocPrint(
+        allocator,
+        "grant_type=refresh_token&refresh_token={s}&client_id={s}",
+        .{ refresh_token, client_id },
+    );
+    defer allocator.free(payload);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    const result = try client.fetch(.{
+        .location = .{ .url = token_url },
+        .method = .POST,
+        .payload = payload,
+        .extra_headers = &.{
+            .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
+            .{ .name = "User-Agent", .value = "nullClaw/1.0" },
+        },
+        .response_writer = &aw.writer,
+    });
+    if (result.status != .ok) return error.TokenRefreshFailed;
+
+    const resp_body = aw.writer.buffer[0..aw.writer.end];
+    defer allocator.free(resp_body);
+
+    var token = try parseTokenResponse(allocator, resp_body);
+
+    // Preserve old refresh_token if response omits a new one
+    if (token.refresh_token == null) {
+        token.refresh_token = try allocator.dupe(u8, refresh_token);
+    }
+
+    return token;
+}
+
+// ── Credential Deletion ───────────────────────────────────────────────
+
+/// Delete a credential for the given provider from ~/.nullclaw/auth.json.
+/// Returns true if the credential was found and removed.
+pub fn deleteCredential(allocator: std.mem.Allocator, provider: []const u8) !bool {
+    const home = platform.getHomeDir(allocator) catch return error.HomeNotSet;
+    defer allocator.free(home);
+
+    const file_path = try std.fs.path.join(allocator, &.{ home, CRED_DIR, CRED_FILE });
+    defer allocator.free(file_path);
+
+    var existing = loadAllCredentials(allocator, file_path) orelse return false;
+    defer {
+        var it = existing.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            freeStoredToken(allocator, entry.value_ptr.*);
+        }
+        existing.deinit();
+    }
+
+    // Check if provider exists
+    var found = false;
+    var remove_it = existing.iterator();
+    while (remove_it.next()) |entry| {
+        if (std.mem.eql(u8, entry.key_ptr.*, provider)) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) return false;
+
+    // Remove and re-serialize
+    if (existing.fetchSwapRemove(provider)) |old| {
+        allocator.free(old.key);
+        freeStoredToken(allocator, old.value);
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+
+    try buf.append(allocator, '{');
+    var first = true;
+    var iter = existing.iterator();
+    while (iter.next()) |entry| {
+        if (!first) try buf.append(allocator, ',');
+        first = false;
+        try json_util.appendJsonKey(&buf, allocator, entry.key_ptr.*);
+        try buf.append(allocator, '{');
+        try json_util.appendJsonKeyValue(&buf, allocator, "access_token", entry.value_ptr.*.access_token);
+        if (entry.value_ptr.*.refresh_token) |rt| {
+            try buf.append(allocator, ',');
+            try json_util.appendJsonKeyValue(&buf, allocator, "refresh_token", rt);
+        }
+        try buf.append(allocator, ',');
+        try json_util.appendJsonInt(&buf, allocator, "expires_at", entry.value_ptr.*.expires_at);
+        try buf.append(allocator, ',');
+        try json_util.appendJsonKeyValue(&buf, allocator, "token_type", entry.value_ptr.*.token_type);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, '}');
+
+    const file = std.fs.cwd().createFile(file_path, .{}) catch return error.CredentialWriteFailed;
+    defer file.close();
+    file.writeAll(buf.items) catch return error.CredentialWriteFailed;
+
+    return true;
+}
+
 // ── Device Code Flow (RFC 8628) ────────────────────────────────────────
 
 pub const DeviceCode = struct {
@@ -365,7 +497,10 @@ pub fn startDeviceCodeFlow(
         .location = .{ .url = device_auth_url },
         .method = .POST,
         .payload = payload,
-        .extra_headers = &.{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }},
+        .extra_headers = &.{
+            .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
+            .{ .name = "User-Agent", .value = "nullClaw/1.0" },
+        },
         .response_writer = &aw.writer,
     });
     if (result.status != .ok) return error.DeviceCodeRequestFailed;
@@ -410,10 +545,16 @@ fn parseDeviceCodeResponse(allocator: std.mem.Allocator, body: []const u8) !Devi
         else => 900,
     } else 900;
 
+    const dc_owned = try allocator.dupe(u8, dc);
+    errdefer allocator.free(dc_owned);
+    const uc_owned = try allocator.dupe(u8, uc);
+    errdefer allocator.free(uc_owned);
+    const vu_owned = try allocator.dupe(u8, vu);
+
     return .{
-        .device_code = try allocator.dupe(u8, dc),
-        .user_code = try allocator.dupe(u8, uc),
-        .verification_uri = try allocator.dupe(u8, vu),
+        .device_code = dc_owned,
+        .user_code = uc_owned,
+        .verification_uri = vu_owned,
         .interval = interval,
         .expires_in = expires_in,
     };
@@ -449,7 +590,10 @@ pub fn pollDeviceCode(
             .location = .{ .url = token_url },
             .method = .POST,
             .payload = payload,
-            .extra_headers = &.{.{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" }},
+            .extra_headers = &.{
+                .{ .name = "Content-Type", .value = "application/x-www-form-urlencoded" },
+                .{ .name = "User-Agent", .value = "nullClaw/1.0" },
+            },
             .response_writer = &aw.writer,
         }) catch continue;
 
@@ -513,11 +657,17 @@ fn parseTokenResponse(allocator: std.mem.Allocator, body: []const u8) !OAuthToke
         else => "Bearer",
     } else "Bearer";
 
+    const at_owned = try allocator.dupe(u8, at);
+    errdefer allocator.free(at_owned);
+    const rt_owned: ?[]const u8 = if (rt) |r| try allocator.dupe(u8, r) else null;
+    errdefer if (rt_owned) |r| allocator.free(r);
+    const tt_owned = try allocator.dupe(u8, tt);
+
     return .{
-        .access_token = try allocator.dupe(u8, at),
-        .refresh_token = if (rt) |r| try allocator.dupe(u8, r) else null,
+        .access_token = at_owned,
+        .refresh_token = rt_owned,
         .expires_at = std.time.timestamp() + expires_in,
-        .token_type = try allocator.dupe(u8, tt),
+        .token_type = tt_owned,
     };
 }
 
@@ -679,4 +829,29 @@ test "base64UrlEncodeAlloc produces correct output" {
     const encoded = try base64UrlEncodeAlloc(std.testing.allocator, input);
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings("aGVsbG8", encoded);
+}
+
+test "parseTokenResponse preserves refresh_token in refresh response" {
+    // Simulates a refresh response that includes a new refresh_token
+    const body =
+        \\{"access_token":"new_access","refresh_token":"new_refresh","expires_in":7200,"token_type":"Bearer"}
+    ;
+    const token = try parseTokenResponse(std.testing.allocator, body);
+    defer token.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("new_access", token.access_token);
+    try std.testing.expectEqualStrings("new_refresh", token.refresh_token.?);
+    try std.testing.expectEqualStrings("Bearer", token.token_type);
+    try std.testing.expect(token.expires_at > std.time.timestamp());
+}
+
+test "parseTokenResponse handles missing refresh_token in response" {
+    const body =
+        \\{"access_token":"refreshed_access","expires_in":3600,"token_type":"Bearer"}
+    ;
+    const token = try parseTokenResponse(std.testing.allocator, body);
+    defer token.deinit(std.testing.allocator);
+
+    try std.testing.expectEqualStrings("refreshed_access", token.access_token);
+    try std.testing.expect(token.refresh_token == null);
 }

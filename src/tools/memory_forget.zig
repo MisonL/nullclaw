@@ -10,12 +10,13 @@ const Memory = mem_root.Memory;
 pub const MemoryForgetTool = struct {
     memory: ?Memory = null,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "memory_forget";
+    pub const tool_description = "Remove a memory by key. Use to delete outdated facts or sensitive data.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"key":{"type":"string","description":"The key of the memory to forget"}},"required":["key"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *MemoryForgetTool) Tool {
         return .{
@@ -24,26 +25,7 @@ pub const MemoryForgetTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *MemoryForgetTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "memory_forget";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Remove a memory by key. Use to delete outdated facts or sensitive data.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"key":{"type":"string","description":"The key of the memory to forget"}},"required":["key"]}
-        ;
-    }
-
-    fn execute(self: *MemoryForgetTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *MemoryForgetTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const key = root.getString(args, "key") orelse
             return ToolResult.fail("Missing 'key' parameter");
 

@@ -22,37 +22,19 @@ pub const MessageTool = struct {
     sent_in_round: bool = false,
     allocator: std.mem.Allocator = undefined,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "message";
+    pub const tool_description = "Send a message to a channel. If channel/chat_id are omitted, sends to the current conversation.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"content":{"type":"string","minLength":1,"description":"Message text to send"},"channel":{"type":"string","description":"Target channel (telegram, discord, slack, etc.). Defaults to current."},"chat_id":{"type":"string","description":"Target chat/room ID. Defaults to current."}},"required":["content"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *MessageTool) Tool {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &vtable,
         };
-    }
-
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *MessageTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "message";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Send a message to a channel. If channel/chat_id are omitted, sends to the current conversation.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"content":{"type":"string","minLength":1,"description":"Message text to send"},"channel":{"type":"string","description":"Target channel (telegram, discord, slack, etc.). Defaults to current."},"chat_id":{"type":"string","description":"Target chat/room ID. Defaults to current."}},"required":["content"]}
-        ;
     }
 
     /// Set the context for the current turn (called before agent.turn).
@@ -67,7 +49,7 @@ pub const MessageTool = struct {
         return self.sent_in_round;
     }
 
-    fn execute(self: *MessageTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *MessageTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const content = root.getString(args, "content") orelse
             return ToolResult.fail("Missing required 'content' parameter");
 

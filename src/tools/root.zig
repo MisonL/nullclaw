@@ -81,6 +81,8 @@ pub const file_append = @import("file_append.zig");
 pub const spawn = @import("spawn.zig");
 pub const i2c = @import("i2c.zig");
 pub const spi = @import("spi.zig");
+pub const path_security = @import("path_security.zig");
+pub const process_util = @import("process_util.zig");
 
 // ── Core types ──────────────────────────────────────────────────────
 
@@ -154,6 +156,39 @@ pub const Tool = struct {
     }
 };
 
+/// Generate a Tool.VTable from a tool struct type at comptime.
+///
+/// The type T must declare:
+///   - `pub const tool_name: []const u8`
+///   - `pub const tool_description: []const u8`
+///   - `pub const tool_params: []const u8`
+///   - `fn execute(self: *T, allocator: Allocator, args: JsonObjectMap) anyerror!ToolResult`
+pub fn ToolVTable(comptime T: type) Tool.VTable {
+    return .{
+        .execute = &struct {
+            fn f(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+                const self: *T = @ptrCast(@alignCast(ptr));
+                return self.execute(allocator, args);
+            }
+        }.f,
+        .name = &struct {
+            fn f(_: *anyopaque) []const u8 {
+                return T.tool_name;
+            }
+        }.f,
+        .description = &struct {
+            fn f(_: *anyopaque) []const u8 {
+                return T.tool_description;
+            }
+        }.f,
+        .parameters_json = &struct {
+            fn f(_: *anyopaque) []const u8 {
+                return T.tool_params;
+            }
+        }.f,
+    };
+}
+
 /// Comptime check that a type correctly implements the Tool interface.
 pub fn assertToolInterface(comptime T: type) void {
     if (!@hasDecl(T, "tool")) @compileError(@typeName(T) ++ " missing tool() method");
@@ -219,6 +254,7 @@ pub fn allTools(
         subagent_manager: ?*@import("../subagent.zig").SubagentManager = null,
         allowed_paths: []const []const u8 = &.{},
         tools_config: @import("../config.zig").ToolsConfig = .{},
+        policy: ?*const @import("../security/policy.zig").SecurityPolicy = null,
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
@@ -233,6 +269,7 @@ pub fn allTools(
         .allowed_paths = opts.allowed_paths,
         .timeout_ns = tc.shell_timeout_secs * std.time.ns_per_s,
         .max_output_bytes = tc.shell_max_output_bytes,
+        .policy = opts.policy,
     };
     try list.append(allocator, st.tool());
 
@@ -352,13 +389,14 @@ pub fn subagentTools(
     opts: struct {
         http_enabled: bool = false,
         allowed_paths: []const []const u8 = &.{},
+        policy: ?*const @import("../security/policy.zig").SecurityPolicy = null,
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
     errdefer list.deinit(allocator);
 
     const st = try allocator.create(shell.ShellTool);
-    st.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths };
+    st.* = .{ .workspace_dir = workspace_dir, .allowed_paths = opts.allowed_paths, .policy = opts.policy };
     try list.append(allocator, st.tool());
 
     const ft = try allocator.create(file_read.FileReadTool);
@@ -403,11 +441,11 @@ test "getString returns unescaped quotes and backslashes" {
 }
 
 test "getString returns unescaped unicode" {
-    // \u0041 = A, \u041f = П
-    const parsed = try parseTestArgs("{\"s\":\"\\u0041BC \\u041f\\u0440\\u0438\\u0432\\u0435\\u0442\"}");
+    // \u0041 = A, \u00c9 = É
+    const parsed = try parseTestArgs("{\"s\":\"\\u0041BC \\u00c9\\u00f6\\u00fc\\u00e4\\u00e8\"}");
     defer parsed.deinit();
     const val = getString(parsed.value.object, "s").?;
-    try std.testing.expectEqualStrings("ABC Привет", val);
+    try std.testing.expectEqualStrings("ABC Éöüäè", val);
 }
 
 test "getString returns unescaped shell script content" {

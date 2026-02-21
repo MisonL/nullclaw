@@ -1,5 +1,4 @@
 const std = @import("std");
-const config = @import("config.zig");
 
 // Integrations -- integration registry and status tracking.
 //

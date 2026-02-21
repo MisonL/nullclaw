@@ -15,12 +15,15 @@ const MAX_PROBE_OUTPUT: usize = 65_536;
 pub const HardwareMemoryTool = struct {
     boards: []const []const u8,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "hardware_memory";
+    pub const tool_description = "Read/write hardware memory maps via probe-rs or serial. " ++
+        "Use for: 'read memory', 'read register', 'dump memory', 'write memory'. " ++
+        "Params: action (read/write), address (hex), length (bytes), value (for write).";
+    pub const tool_params =
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["read","write"],"description":"read or write memory"},"address":{"type":"string","description":"Memory address in hex (e.g. 0x20000000)"},"length":{"type":"integer","description":"Bytes to read (default 128, max 256)"},"value":{"type":"string","description":"Hex value to write (for write action)"},"board":{"type":"string","description":"Board name (optional if only one configured)"}},"required":["action"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *HardwareMemoryTool) Tool {
         return .{
@@ -29,28 +32,7 @@ pub const HardwareMemoryTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *HardwareMemoryTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "hardware_memory";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Read/write hardware memory maps via probe-rs or serial. " ++
-            "Use for: 'read memory', 'read register', 'dump memory', 'write memory'. " ++
-            "Params: action (read/write), address (hex), length (bytes), value (for write).";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["read","write"],"description":"read or write memory"},"address":{"type":"string","description":"Memory address in hex (e.g. 0x20000000)"},"length":{"type":"integer","description":"Bytes to read (default 128, max 256)"},"value":{"type":"string","description":"Hex value to write (for write action)"},"board":{"type":"string","description":"Board name (optional if only one configured)"}},"required":["action"]}
-        ;
-    }
-
-    fn execute(self: *HardwareMemoryTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *HardwareMemoryTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         if (self.boards.len == 0) {
             return ToolResult.fail("No peripherals configured. Add boards to config.toml [peripherals.boards].");
         }
@@ -85,25 +67,13 @@ pub const HardwareMemoryTool = struct {
     }
 };
 
+const proc = @import("process_util.zig");
+
 /// Check if probe-rs is available on the system.
 fn probeRsAvailable(allocator: std.mem.Allocator) bool {
-    var child = std.process.Child.init(
-        &.{ "probe-rs", "--version" },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    child.spawn() catch return false;
-
-    // Drain pipes so the child doesn't block
-    _ = child.stdout.?.readToEndAlloc(allocator, 4096) catch "";
-    _ = child.stderr.?.readToEndAlloc(allocator, 4096) catch "";
-    const term = child.wait() catch return false;
-    return switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
+    const result = proc.run(allocator, &.{ "probe-rs", "--version" }, .{ .max_output_bytes = 4096 }) catch return false;
+    result.deinit(allocator);
+    return result.success;
 }
 
 /// Execute a probe-rs read command: `probe-rs read --chip CHIP ADDRESS LENGTH`
@@ -117,41 +87,26 @@ fn probeRead(allocator: std.mem.Allocator, chip: []const u8, address: u64, lengt
     const len_str = try std.fmt.allocPrint(allocator, "{d}", .{length});
     defer allocator.free(len_str);
 
-    var child = std.process.Child.init(
-        &.{ "probe-rs", "read", "--chip", chip, addr_str, len_str },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    child.spawn() catch {
+    const result = proc.run(allocator, &.{ "probe-rs", "read", "--chip", chip, addr_str, len_str }, .{ .max_output_bytes = MAX_PROBE_OUTPUT }) catch {
         return ToolResult.fail("Failed to spawn probe-rs read command");
     };
+    defer allocator.free(result.stderr);
 
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, MAX_PROBE_OUTPUT);
-    defer allocator.free(stdout);
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, MAX_PROBE_OUTPUT);
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| {
-            if (code == 0) {
-                const out = try allocator.dupe(u8, if (stdout.len > 0) stdout else "(no output from probe-rs)");
-                return ToolResult{ .success = true, .output = out };
-            } else {
-                const err_msg = try std.fmt.allocPrint(
-                    allocator,
-                    "probe-rs read failed (exit {d}): {s}",
-                    .{ code, if (stderr.len > 0) stderr else "unknown error" },
-                );
-                return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
-            }
-        },
-        else => {
-            return ToolResult{ .success = false, .output = "", .error_msg = "probe-rs read terminated by signal" };
-        },
+    if (result.success) {
+        if (result.stdout.len > 0) return ToolResult{ .success = true, .output = result.stdout };
+        allocator.free(result.stdout);
+        return ToolResult{ .success = true, .output = try allocator.dupe(u8, "(no output from probe-rs)") };
     }
+    defer allocator.free(result.stdout);
+    if (result.exit_code) |code| {
+        const err_msg = try std.fmt.allocPrint(
+            allocator,
+            "probe-rs read failed (exit {d}): {s}",
+            .{ code, if (result.stderr.len > 0) result.stderr else "unknown error" },
+        );
+        return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
+    }
+    return ToolResult{ .success = false, .output = "", .error_msg = "probe-rs read terminated by signal" };
 }
 
 /// Execute a probe-rs write command: `probe-rs write --chip CHIP ADDRESS VALUE`
@@ -163,45 +118,30 @@ fn probeWrite(allocator: std.mem.Allocator, chip: []const u8, address: u64, valu
     const addr_str = try std.fmt.allocPrint(allocator, "0x{X:0>8}", .{address});
     defer allocator.free(addr_str);
 
-    var child = std.process.Child.init(
-        &.{ "probe-rs", "write", "--chip", chip, addr_str, value },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    child.spawn() catch {
+    const result = proc.run(allocator, &.{ "probe-rs", "write", "--chip", chip, addr_str, value }, .{ .max_output_bytes = MAX_PROBE_OUTPUT }) catch {
         return ToolResult.fail("Failed to spawn probe-rs write command");
     };
+    defer allocator.free(result.stderr);
 
-    const stdout = try child.stdout.?.readToEndAlloc(allocator, MAX_PROBE_OUTPUT);
-    defer allocator.free(stdout);
-    const stderr = try child.stderr.?.readToEndAlloc(allocator, MAX_PROBE_OUTPUT);
-    defer allocator.free(stderr);
-
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| {
-            if (code == 0) {
-                const out = try std.fmt.allocPrint(
-                    allocator,
-                    "Write OK: 0x{X:0>8} <- {s} ({s}){s}",
-                    .{ address, value, chip, if (stdout.len > 0) stdout else "" },
-                );
-                return ToolResult{ .success = true, .output = out };
-            } else {
-                const err_msg = try std.fmt.allocPrint(
-                    allocator,
-                    "probe-rs write failed (exit {d}): {s}",
-                    .{ code, if (stderr.len > 0) stderr else "unknown error" },
-                );
-                return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
-            }
-        },
-        else => {
-            return ToolResult{ .success = false, .output = "", .error_msg = "probe-rs write terminated by signal" };
-        },
+    if (result.success) {
+        defer allocator.free(result.stdout);
+        const out = try std.fmt.allocPrint(
+            allocator,
+            "Write OK: 0x{X:0>8} <- {s} ({s}){s}",
+            .{ address, value, chip, if (result.stdout.len > 0) result.stdout else "" },
+        );
+        return ToolResult{ .success = true, .output = out };
     }
+    defer allocator.free(result.stdout);
+    if (result.exit_code) |code| {
+        const err_msg = try std.fmt.allocPrint(
+            allocator,
+            "probe-rs write failed (exit {d}): {s}",
+            .{ code, if (result.stderr.len > 0) result.stderr else "unknown error" },
+        );
+        return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
+    }
+    return ToolResult{ .success = false, .output = "", .error_msg = "probe-rs write terminated by signal" };
 }
 
 fn chipForBoard(board: []const u8) ?[]const u8 {

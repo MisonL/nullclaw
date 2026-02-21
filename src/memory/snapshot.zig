@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const root = @import("root.zig");
-const yc = @import("../root.zig");
+const json_util = @import("../json_util.zig");
 const Memory = root.Memory;
 const MemoryEntry = root.MemoryEntry;
 const MemoryCategory = root.MemoryCategory;
@@ -35,13 +35,13 @@ pub fn exportSnapshot(allocator: std.mem.Allocator, mem: Memory, workspace_dir: 
     for (entries, 0..) |entry, i| {
         if (i > 0) try json_buf.appendSlice(allocator, ",\n");
         try json_buf.appendSlice(allocator, "  {");
-        try yc.json_util.appendJsonKeyValue(&json_buf, allocator, "key", entry.key);
+        try json_util.appendJsonKeyValue(&json_buf, allocator, "key", entry.key);
         try json_buf.appendSlice(allocator, ",");
-        try yc.json_util.appendJsonKeyValue(&json_buf, allocator, "content", entry.content);
+        try json_util.appendJsonKeyValue(&json_buf, allocator, "content", entry.content);
         try json_buf.appendSlice(allocator, ",");
-        try yc.json_util.appendJsonKeyValue(&json_buf, allocator, "category", entry.category.toString());
+        try json_util.appendJsonKeyValue(&json_buf, allocator, "category", entry.category.toString());
         try json_buf.appendSlice(allocator, ",");
-        try yc.json_util.appendJsonKeyValue(&json_buf, allocator, "timestamp", entry.timestamp);
+        try json_util.appendJsonKeyValue(&json_buf, allocator, "timestamp", entry.timestamp);
         try json_buf.append(allocator, '}');
     }
 

@@ -2,11 +2,8 @@ const std = @import("std");
 
 // ── Autonomy Level ──────────────────────────────────────────────
 
-pub const AutonomyLevel = enum {
-    read_only,
-    supervised,
-    full,
-};
+/// Re-exported from security/policy.zig — single source of truth (with methods).
+pub const AutonomyLevel = @import("security/policy.zig").AutonomyLevel;
 
 // ── Hardware Transport ──────────────────────────────────────────
 
@@ -58,11 +55,9 @@ pub const AutonomyConfig = struct {
     level: AutonomyLevel = .supervised,
     workspace_only: bool = true,
     max_actions_per_hour: u32 = 20,
-    max_cost_per_day_cents: u32 = 500,
     require_approval_for_medium_risk: bool = true,
     block_high_risk_commands: bool = true,
     allowed_commands: []const []const u8 = &.{},
-    forbidden_paths: []const []const u8 = &.{},
     /// Additional directories (absolute paths) the agent may access beyond workspace_dir.
     /// Resolved via realpath at check time; system-critical paths are always blocked.
     allowed_paths: []const []const u8 = &.{},
@@ -107,7 +102,7 @@ pub const SchedulerConfig = struct {
 
 pub const AgentConfig = struct {
     compact_context: bool = false,
-    max_tool_iterations: u32 = 10,
+    max_tool_iterations: u32 = 25,
     max_history_messages: u32 = 50,
     parallel_tools: bool = false,
     tool_dispatcher: []const u8 = "auto",

@@ -3,44 +3,26 @@ const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
-const isResolvedPathAllowed = @import("file_edit.zig").isResolvedPathAllowed;
+const isResolvedPathAllowed = @import("path_security.zig").isResolvedPathAllowed;
 
 /// Git operations tool for structured repository management.
 pub const GitTool = struct {
     workspace_dir: []const u8,
     allowed_paths: []const []const u8 = &.{},
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "git_operations";
+    pub const tool_description = "Perform structured Git operations (status, diff, log, branch, commit, add, checkout, stash).";
+    pub const tool_params =
+        \\{"type":"object","properties":{"operation":{"type":"string","enum":["status","diff","log","branch","commit","add","checkout","stash"],"description":"Git operation to perform"},"message":{"type":"string","description":"Commit message (for commit)"},"paths":{"type":"string","description":"File paths (for add)"},"branch":{"type":"string","description":"Branch name (for checkout)"},"files":{"type":"string","description":"Files to diff"},"cached":{"type":"boolean","description":"Show staged changes (diff)"},"limit":{"type":"integer","description":"Log entry count (default: 10)"},"cwd":{"type":"string","description":"Repository directory (absolute path within allowed paths; defaults to workspace)"}},"required":["operation"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *GitTool) Tool {
         return .{
             .ptr = @ptrCast(self),
             .vtable = &vtable,
         };
-    }
-
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *GitTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "git_operations";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Perform structured Git operations (status, diff, log, branch, commit, add, checkout, stash).";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"operation":{"type":"string","enum":["status","diff","log","branch","commit","add","checkout","stash"],"description":"Git operation to perform"},"message":{"type":"string","description":"Commit message (for commit)"},"paths":{"type":"string","description":"File paths (for add)"},"branch":{"type":"string","description":"Branch name (for checkout)"},"files":{"type":"string","description":"Files to diff"},"cached":{"type":"boolean","description":"Show staged changes (diff)"},"limit":{"type":"integer","description":"Log entry count (default: 10)"},"cwd":{"type":"string","description":"Repository directory (absolute path within allowed paths; defaults to workspace)"}},"required":["operation"]}
-        ;
     }
 
     /// Returns false if the git arguments contain dangerous patterns.
@@ -106,20 +88,18 @@ pub const GitTool = struct {
 
     /// Returns true for operations that modify the repository.
     fn requiresWriteAccess(operation: []const u8) bool {
-        const write_ops = [_][]const u8{
-            "commit",   "push",  "merge", "rebase", "reset",
-            "checkout", "add",   "rm",    "mv",     "tag",
-            "branch",   "clean",
-        };
-        for (write_ops) |op| {
-            if (std.mem.eql(u8, operation, op)) return true;
-        }
-        // "stash push" is write, but we check at the stash level
-        if (std.mem.eql(u8, operation, "stash")) return true;
-        return false;
+        const write_ops = std.StaticStringMap(void).initComptime(.{
+            .{ "commit", {} }, .{ "push", {} },   .{ "merge", {} },
+            .{ "rebase", {} }, .{ "reset", {} },  .{ "checkout", {} },
+            .{ "add", {} },    .{ "rm", {} },     .{ "mv", {} },
+            .{ "tag", {} },    .{ "branch", {} }, .{ "clean", {} },
+            // "stash push" is write, but we check at the stash level
+            .{ "stash", {} },
+        });
+        return write_ops.has(operation);
     }
 
-    fn execute(self: *GitTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *GitTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const operation = root.getString(args, "operation") orelse
             return ToolResult.fail("Missing 'operation' parameter");
 
@@ -134,7 +114,7 @@ pub const GitTool = struct {
 
         // Resolve optional cwd override
         const effective_cwd = if (root.getString(args, "cwd")) |cwd| blk: {
-            if (cwd.len == 0 or cwd[0] != '/')
+            if (cwd.len == 0 or !std.fs.path.isAbsolute(cwd))
                 return ToolResult.fail("cwd must be an absolute path");
             if (self.allowed_paths.len == 0)
                 return ToolResult.fail("cwd not allowed (no allowed_paths configured)");
@@ -150,14 +130,28 @@ pub const GitTool = struct {
             break :blk cwd;
         } else self.workspace_dir;
 
-        if (std.mem.eql(u8, operation, "status")) return self.runGitOp(allocator, effective_cwd, &.{ "status", "--porcelain=2", "--branch" });
-        if (std.mem.eql(u8, operation, "diff")) return self.gitDiff(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "log")) return self.gitLog(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "branch")) return self.runGitOp(allocator, effective_cwd, &.{ "branch", "--format=%(refname:short)|%(HEAD)" });
-        if (std.mem.eql(u8, operation, "commit")) return self.gitCommit(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "add")) return self.gitAdd(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "checkout")) return self.gitCheckout(allocator, effective_cwd, args);
-        if (std.mem.eql(u8, operation, "stash")) return self.gitStash(allocator, effective_cwd, args);
+        const GitOp = enum { status, diff, log, branch, commit, add, checkout, stash };
+        const op_map = std.StaticStringMap(GitOp).initComptime(.{
+            .{ "status", .status },
+            .{ "diff", .diff },
+            .{ "log", .log },
+            .{ "branch", .branch },
+            .{ "commit", .commit },
+            .{ "add", .add },
+            .{ "checkout", .checkout },
+            .{ "stash", .stash },
+        });
+
+        if (op_map.get(operation)) |op| return switch (op) {
+            .status => self.runGitOp(allocator, effective_cwd, &.{ "status", "--porcelain=2", "--branch" }),
+            .diff => self.gitDiff(allocator, effective_cwd, args),
+            .log => self.gitLog(allocator, effective_cwd, args),
+            .branch => self.runGitOp(allocator, effective_cwd, &.{ "branch", "--format=%(refname:short)|%(HEAD)" }),
+            .commit => self.gitCommit(allocator, effective_cwd, args),
+            .add => self.gitAdd(allocator, effective_cwd, args),
+            .checkout => self.gitCheckout(allocator, effective_cwd, args),
+            .stash => self.gitStash(allocator, effective_cwd, args),
+        };
 
         const msg = try std.fmt.allocPrint(allocator, "Unknown operation: {s}", .{operation});
         return ToolResult{ .success = false, .output = "", .error_msg = msg };
@@ -171,21 +165,9 @@ pub const GitTool = struct {
             argv_buf[i] = a;
         }
 
-        var child = std.process.Child.init(argv_buf[0 .. arg_count + 1], allocator);
-        child.cwd = git_cwd;
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, 1_048_576);
-        const stderr = try child.stderr.?.readToEndAlloc(allocator, 1_048_576);
-        const term = try child.wait();
-
-        const success = switch (term) {
-            .Exited => |code| code == 0,
-            else => false,
-        };
-        return .{ .stdout = stdout, .stderr = stderr, .success = success };
+        const proc = @import("process_util.zig");
+        const result = try proc.run(allocator, argv_buf[0 .. arg_count + 1], .{ .cwd = git_cwd });
+        return .{ .stdout = result.stdout, .stderr = result.stderr, .success = result.success };
     }
 
     /// Run a simple git operation and return stdout on success.
@@ -505,8 +487,8 @@ test "truncateCommitMessage short message unchanged" {
 }
 
 test "truncateCommitMessage truncates at UTF-8 boundary" {
-    // "Привет" in UTF-8 is 12 bytes (2 bytes per Cyrillic char)
-    const msg = "Привет мир!"; // 20 bytes
+    // "Éééééé" in UTF-8 is 12 bytes (2 bytes per accented char)
+    const msg = "Éééééé ààà!"; // 20 bytes
     const truncated = GitTool.truncateCommitMessage(msg, 10);
     // Should truncate to 10 bytes which is at a clean boundary (5 Cyrillic chars)
     try std.testing.expect(truncated.len <= 10);

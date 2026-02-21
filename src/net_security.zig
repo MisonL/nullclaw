@@ -91,7 +91,7 @@ pub fn isLocalHost(host: []const u8) bool {
 }
 
 /// Returns true if the IPv4 address is not globally routable.
-pub fn isNonGlobalV4(addr: [4]u8) bool {
+fn isNonGlobalV4(addr: [4]u8) bool {
     const a = addr[0];
     const b = addr[1];
     const c = addr[2];
@@ -125,7 +125,7 @@ pub fn isNonGlobalV4(addr: [4]u8) bool {
 }
 
 /// Returns true if the IPv6 address is not globally routable.
-pub fn isNonGlobalV6(segs: [8]u16) bool {
+fn isNonGlobalV6(segs: [8]u16) bool {
     // ::1 (loopback)
     if (segs[0] == 0 and segs[1] == 0 and segs[2] == 0 and segs[3] == 0 and
         segs[4] == 0 and segs[5] == 0 and segs[6] == 0 and segs[7] == 1)
@@ -158,7 +158,7 @@ pub fn isNonGlobalV6(segs: [8]u16) bool {
 }
 
 /// Parse a dotted-decimal IPv4 address string into 4 octets.
-pub fn parseIpv4(s: []const u8) ?[4]u8 {
+fn parseIpv4(s: []const u8) ?[4]u8 {
     var octets: [4]u8 = undefined;
     var count: u8 = 0;
     var start: usize = 0;
@@ -180,7 +180,7 @@ pub fn parseIpv4(s: []const u8) ?[4]u8 {
 
 /// Parse an IPv6 address string into 8 segments.
 /// Supports :: abbreviation and mixed IPv4 notation (::ffff:1.2.3.4).
-pub fn parseIpv6(s: []const u8) ?[8]u16 {
+fn parseIpv6(s: []const u8) ?[8]u16 {
     if (s.len == 0) return null;
 
     // Check for :: and split around it

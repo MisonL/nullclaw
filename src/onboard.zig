@@ -845,7 +845,7 @@ pub fn runWizard(allocator: std.mem.Allocator) !void {
         return;
     };
     if (ws_input.len > 0) {
-        cfg.workspace_dir = try allocator.dupe(u8, ws_input);
+        cfg.workspace_dir = try cfg.allocator.dupe(u8, ws_input);
     }
     try out.print("  -> {s}\n\n", .{cfg.workspace_dir});
 
@@ -1892,7 +1892,7 @@ test "cache read returns error for expired cache" {
 
     // Write a cache with old timestamp
     const old_json = "{\"fetched_at\": 1000000, \"myprov\": [\"old-model\"]}";
-    const file = try std.fs.createFileAbsolute(cache_path, .{});
+    const file = try tmp.dir.createFile("models_cache.json", .{});
     defer file.close();
     try file.writeAll(old_json);
 
@@ -1901,6 +1901,14 @@ test "cache read returns error for expired cache" {
 }
 
 test "loadModelsWithCache falls back on fetch failure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+    const nonexistent = try std.fs.path.join(std.testing.allocator, &.{ base, "nonexistent-dir-xyz" });
+    defer std.testing.allocator.free(nonexistent);
+
     // openai without api key will fail fetch, falling back to hardcoded list
     const allocator = std.testing.allocator;
     var test_tmp = try OnboardTestTmpDir.init(allocator);

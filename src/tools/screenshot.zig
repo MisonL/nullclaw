@@ -11,12 +11,13 @@ const JsonObjectMap = root.JsonObjectMap;
 pub const ScreenshotTool = struct {
     workspace_dir: []const u8,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "screenshot";
+    pub const tool_description = "Capture a screenshot of the current screen. Returns [IMAGE:path] marker — include it verbatim in your response to send the image to the user.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"filename":{"type":"string","description":"Optional filename (default: screenshot.png). Saved in workspace."}}}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *ScreenshotTool) Tool {
         return .{
@@ -25,26 +26,7 @@ pub const ScreenshotTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *ScreenshotTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "screenshot";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Capture a screenshot of the current screen. Returns [IMAGE:path] marker — include it verbatim in your response to send the image to the user.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"filename":{"type":"string","description":"Optional filename (default: screenshot.png). Saved in workspace."}}}
-        ;
-    }
-
-    fn execute(self: *ScreenshotTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *ScreenshotTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const filename = root.getString(args, "filename") orelse "screenshot.png";
 
         // Build output path: workspace_dir/filename
@@ -66,13 +48,11 @@ pub const ScreenshotTool = struct {
             },
         };
 
-        var child = std.process.Child.init(argv, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        child.spawn() catch {
+        const proc = @import("process_util.zig");
+        const result = proc.run(allocator, argv, .{}) catch {
             return ToolResult.fail("Failed to spawn screenshot command");
         };
+        defer result.deinit(allocator);
 
         const stderr = child.stderr.?.readToEndAlloc(allocator, 1_048_576) catch "";
         defer if (stderr.len > 0) allocator.free(stderr);
@@ -90,7 +70,7 @@ pub const ScreenshotTool = struct {
             },
             else => {},
         }
-        const err_msg = try std.fmt.allocPrint(allocator, "Screenshot command failed: {s}", .{if (stderr.len > 0) stderr else "unknown error"});
+        const err_msg = try std.fmt.allocPrint(allocator, "Screenshot command failed: {s}", .{if (result.stderr.len > 0) result.stderr else "unknown error"});
         return ToolResult{ .success = false, .output = "", .error_msg = err_msg };
     }
 };

@@ -9,12 +9,13 @@ const MAX_IMAGE_BYTES: u64 = 5_242_880;
 
 /// Tool to read image metadata (format, dimensions, size).
 pub const ImageInfoTool = struct {
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "image_info";
+    pub const tool_description = "Read image file metadata (format, dimensions, size).";
+    pub const tool_params =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Path to the image file"},"include_base64":{"type":"boolean","description":"Include base64-encoded data (default: false)"}},"required":["path"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *ImageInfoTool) Tool {
         return .{
@@ -23,26 +24,7 @@ pub const ImageInfoTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *ImageInfoTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "image_info";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Read image file metadata (format, dimensions, size).";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"path":{"type":"string","description":"Path to the image file"},"include_base64":{"type":"boolean","description":"Include base64-encoded data (default: false)"}},"required":["path"]}
-        ;
-    }
-
-    fn execute(_: *ImageInfoTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(_: *ImageInfoTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const path = root.getString(args, "path") orelse
             return ToolResult.fail("Missing 'path' parameter");
 

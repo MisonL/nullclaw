@@ -11,12 +11,15 @@ const JsonObjectMap = root.JsonObjectMap;
 pub const SpiTool = struct {
     allocator: std.mem.Allocator = undefined,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "spi";
+    pub const tool_description = "Interact with SPI hardware devices. " ++
+        "Supports listing available SPI devices, full-duplex data transfer, and read-only mode. " ++
+        "Linux only — uses /dev/spidevX.Y via ioctl.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"action":{"type":"string","description":"Action: list, transfer, or read"},"device":{"type":"string","description":"SPI device path (default /dev/spidev0.0)"},"data":{"type":"string","description":"Hex bytes to send, e.g. 'FF 0A 3B'"},"speed_hz":{"type":"integer","description":"SPI clock speed in Hz (default 1000000)"},"mode":{"type":"integer","description":"SPI mode 0-3 (default 0)"},"bits_per_word":{"type":"integer","description":"Bits per word (default 8)"}},"required":["action"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *SpiTool) Tool {
         return .{
@@ -25,28 +28,7 @@ pub const SpiTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *SpiTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "spi";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Interact with SPI hardware devices. " ++
-            "Supports listing available SPI devices, full-duplex data transfer, and read-only mode. " ++
-            "Linux only — uses /dev/spidevX.Y via ioctl.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"action":{"type":"string","description":"Action: list, transfer, or read"},"device":{"type":"string","description":"SPI device path (default /dev/spidev0.0)"},"data":{"type":"string","description":"Hex bytes to send, e.g. 'FF 0A 3B'"},"speed_hz":{"type":"integer","description":"SPI clock speed in Hz (default 1000000)"},"mode":{"type":"integer","description":"SPI mode 0-3 (default 0)"},"bits_per_word":{"type":"integer","description":"Bits per word (default 8)"}},"required":["action"]}
-        ;
-    }
-
-    fn execute(self: *SpiTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *SpiTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         _ = self;
         const action = root.getString(args, "action") orelse
             return ToolResult.fail("Missing 'action' parameter");
@@ -152,7 +134,7 @@ pub const SpiTool = struct {
         bits_per_word: u8,
     ) !ToolResult {
         if (comptime builtin.os.tag != .linux) {
-            unreachable;
+            return ToolResult.fail("SPI is only supported on Linux");
         }
 
         // ioctl constants for SPI

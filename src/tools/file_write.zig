@@ -3,20 +3,21 @@ const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
-const isPathSafe = @import("file_edit.zig").isPathSafe;
-const isResolvedPathAllowed = @import("file_edit.zig").isResolvedPathAllowed;
+const isPathSafe = @import("path_security.zig").isPathSafe;
+const isResolvedPathAllowed = @import("path_security.zig").isResolvedPathAllowed;
 
 /// Write file contents with workspace path scoping.
 pub const FileWriteTool = struct {
     workspace_dir: []const u8,
     allowed_paths: []const []const u8 = &.{},
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "file_write";
+    pub const tool_description = "Write contents to a file in the workspace";
+    pub const tool_params =
+        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative path to the file within the workspace"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *FileWriteTool) Tool {
         return .{
@@ -25,26 +26,7 @@ pub const FileWriteTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *FileWriteTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "file_write";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Write contents to a file in the workspace";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"path":{"type":"string","description":"Relative path to the file within the workspace"},"content":{"type":"string","description":"Content to write to the file"}},"required":["path","content"]}
-        ;
-    }
-
-    fn execute(self: *FileWriteTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *FileWriteTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const path = root.getString(args, "path") orelse
             return ToolResult.fail("Missing 'path' parameter");
 

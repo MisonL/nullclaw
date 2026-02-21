@@ -15,12 +15,15 @@ pub const ComposioTool = struct {
     api_key: []const u8,
     entity_id: []const u8,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "composio";
+    pub const tool_description = "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). " ++
+        "Use action='list' to see available actions, action='execute' with action_name/tool_slug and params, " ++
+        "or action='connect' with app/auth_config_id to get OAuth URL.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["list","execute","connect"],"description":"Operation: list, execute, or connect"},"app":{"type":"string","description":"App/toolkit filter for list, or app for connect"},"action_name":{"type":"string","description":"Action identifier to execute"},"tool_slug":{"type":"string","description":"Preferred v3 tool slug (alias of action_name)"},"params":{"type":"object","description":"Parameters for the action"},"entity_id":{"type":"string","description":"Entity/user ID for multi-user setups"},"auth_config_id":{"type":"string","description":"Optional v3 auth config id for connect"},"connected_account_id":{"type":"string","description":"Optional connected account ID for execute"}},"required":["action"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *ComposioTool) Tool {
         return .{
@@ -29,28 +32,7 @@ pub const ComposioTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *ComposioTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "composio";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). " ++
-            "Use action='list' to see available actions, action='execute' with action_name/tool_slug and params, " ++
-            "or action='connect' with app/auth_config_id to get OAuth URL.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["list","execute","connect"],"description":"Operation: list, execute, or connect"},"app":{"type":"string","description":"App/toolkit filter for list, or app for connect"},"action_name":{"type":"string","description":"Action identifier to execute"},"tool_slug":{"type":"string","description":"Preferred v3 tool slug (alias of action_name)"},"params":{"type":"object","description":"Parameters for the action"},"entity_id":{"type":"string","description":"Entity/user ID for multi-user setups"},"auth_config_id":{"type":"string","description":"Optional v3 auth config id for connect"},"connected_account_id":{"type":"string","description":"Optional connected account ID for execute"}},"required":["action"]}
-        ;
-    }
-
-    fn execute(self: *ComposioTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *ComposioTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const action = root.getString(args, "action") orelse
             return ToolResult.fail("Missing 'action' parameter");
 
@@ -336,34 +318,20 @@ pub const ComposioTool = struct {
 
     /// Run curl as a child process and return stdout on success, stderr on failure.
     fn runCurl(_: *ComposioTool, allocator: std.mem.Allocator, argv: []const []const u8) !ToolResult {
-        const max_output: usize = 1_048_576;
-
-        var child = std.process.Child.init(argv, allocator);
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        try child.spawn();
-
-        const stdout = try child.stdout.?.readToEndAlloc(allocator, max_output);
-        defer allocator.free(stdout);
-        const stderr = try child.stderr.?.readToEndAlloc(allocator, max_output);
-        defer allocator.free(stderr);
-
-        const term = try child.wait();
-        switch (term) {
-            .Exited => |code| {
-                if (code == 0) {
-                    const out = try allocator.dupe(u8, if (stdout.len > 0) stdout else "(empty response)");
-                    return ToolResult{ .success = true, .output = out };
-                } else {
-                    const err_out = try allocator.dupe(u8, if (stderr.len > 0) stderr else "curl failed with non-zero exit code");
-                    return ToolResult{ .success = false, .output = "", .error_msg = err_out };
-                }
-            },
-            else => {
-                return ToolResult{ .success = false, .output = "", .error_msg = "curl terminated by signal" };
-            },
+        const proc = @import("process_util.zig");
+        const result = try proc.run(allocator, argv, .{});
+        defer allocator.free(result.stderr);
+        if (result.success) {
+            if (result.stdout.len > 0) return ToolResult{ .success = true, .output = result.stdout };
+            allocator.free(result.stdout);
+            return ToolResult{ .success = true, .output = try allocator.dupe(u8, "(empty response)") };
         }
+        defer allocator.free(result.stdout);
+        if (result.exit_code != null) {
+            const err_out = try allocator.dupe(u8, if (result.stderr.len > 0) result.stderr else "curl failed with non-zero exit code");
+            return ToolResult{ .success = false, .output = "", .error_msg = err_out };
+        }
+        return ToolResult{ .success = false, .output = "", .error_msg = "curl terminated by signal" };
     }
 };
 

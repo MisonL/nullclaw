@@ -14,12 +14,13 @@ const MAX_FETCH_BYTES: usize = 65536;
 /// Supports "open" (launch URL), "read" (fetch body via curl), and returns
 /// informative errors for CDP-only actions (click, type, scroll, screenshot).
 pub const BrowserTool = struct {
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "browser";
+    pub const tool_description = "Browse web pages. Actions: open, screenshot, click, type, scroll, read.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["open","screenshot","click","type","scroll","read"],"description":"Browser action to perform"},"url":{"type":"string","description":"URL to open"},"selector":{"type":"string","description":"CSS selector for click/type"},"text":{"type":"string","description":"Text to type"}},"required":["action"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *BrowserTool) Tool {
         return .{
@@ -28,26 +29,7 @@ pub const BrowserTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *BrowserTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "browser";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Browse web pages. Actions: open, screenshot, click, type, scroll, read.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["open","screenshot","click","type","scroll","read"],"description":"Browser action to perform"},"url":{"type":"string","description":"URL to open"},"selector":{"type":"string","description":"CSS selector for click/type"},"text":{"type":"string","description":"Text to type"}},"required":["action"]}
-        ;
-    }
-
-    fn execute(_: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(_: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const action = root.getString(args, "action") orelse
             return ToolResult.fail("Missing 'action' parameter");
 
@@ -82,6 +64,20 @@ pub const BrowserTool = struct {
             return ToolResult.fail("Only https:// URLs are supported for security");
         }
 
+        // On Windows cmd.exe /c start interprets shell metacharacters in the URL.
+        // On Unix, open/xdg-open receives the URL as a separate argv element (execvp),
+        // so metacharacters like & (query params) and % (percent-encoding) are safe.
+        if (comptime builtin.os.tag == .windows) {
+            for (url) |c| {
+                if (c == '&' or c == '|' or c == ';' or c == '"' or c == '\'' or
+                    c == '<' or c == '>' or c == '`' or c == '(' or c == ')' or
+                    c == '^' or c == '%' or c == '!' or c == '\n' or c == '\r')
+                {
+                    return ToolResult.fail("URL contains shell metacharacters — open manually for safety");
+                }
+            }
+        }
+
         // In test mode, skip actual browser spawn to avoid opening windows during CI/tests.
         if (builtin.is_test) {
             const msg = try std.fmt.allocPrint(allocator, "Opened {s} in system browser", .{url});
@@ -111,35 +107,19 @@ pub const BrowserTool = struct {
         else if (builtin.os.tag == .linux)
             "xdg-open"
         else
-            @compileError("unsupported OS for browser open");
+            &.{ comptime if (builtin.os.tag == .macos) "open" else "xdg-open", url };
 
-        var child = std.process.Child.init(
-            &.{ open_cmd, url },
-            allocator,
-        );
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        child.spawn() catch {
+        const result = proc.run(allocator, argv, .{ .max_output_bytes = 4096 }) catch {
             return ToolResult.fail("Failed to spawn browser open command");
         };
+        result.deinit(allocator);
 
-        // Drain pipes so the child doesn't block.
-        _ = child.stdout.?.readToEndAlloc(allocator, 4096) catch "";
-        _ = child.stderr.?.readToEndAlloc(allocator, 4096) catch "";
-
-        const term = child.wait() catch {
-            return ToolResult.fail("Failed to wait for browser open command");
-        };
-
-        switch (term) {
-            .Exited => |code| if (code != 0) {
+        if (!result.success) {
+            if (result.exit_code) |code| {
                 const msg = try std.fmt.allocPrint(allocator, "Browser open command exited with code {d}", .{code});
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            },
-            else => {
-                return ToolResult{ .success = false, .output = "", .error_msg = "Browser open command terminated by signal" };
-            },
+            }
+            return ToolResult{ .success = false, .output = "", .error_msg = "Browser open command terminated by signal" };
         }
 
         const msg = try std.fmt.allocPrint(allocator, "Opened {s} in system browser", .{url});
@@ -157,52 +137,33 @@ pub const BrowserTool = struct {
         //   -m 10  timeout 10 seconds
         //   --max-filesize 65536  abort if body exceeds 64 KB
         const max_size_str = std.fmt.comptimePrint("{d}", .{MAX_FETCH_BYTES});
-        var child = std.process.Child.init(
-            &.{ "curl", "-sS", "-L", "-m", "10", "--max-filesize", max_size_str, url },
-            allocator,
-        );
-        child.stdout_behavior = .Pipe;
-        child.stderr_behavior = .Pipe;
-
-        child.spawn() catch {
+        const proc = @import("process_util.zig");
+        const result = proc.run(allocator, &.{ "curl", "-sS", "-L", "-m", "10", "--max-filesize", max_size_str, url }, .{ .max_output_bytes = MAX_FETCH_BYTES }) catch {
             return ToolResult.fail("Failed to spawn curl — is curl installed?");
         };
+        defer allocator.free(result.stderr);
+        defer allocator.free(result.stdout);
 
-        const raw_body = child.stdout.?.readToEndAlloc(allocator, MAX_FETCH_BYTES) catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "Failed to read curl output: {s}", .{@errorName(err)});
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
-        };
-        defer allocator.free(raw_body);
-
-        const stderr_out = child.stderr.?.readToEndAlloc(allocator, 4096) catch "";
-        defer if (stderr_out.len > 0) allocator.free(stderr_out);
-
-        const term = child.wait() catch {
-            return ToolResult.fail("Failed to wait for curl process");
-        };
-
-        switch (term) {
-            .Exited => |code| if (code != 0) {
-                const detail = if (stderr_out.len > 0) stderr_out else "curl request failed";
+        if (!result.success) {
+            if (result.exit_code) |code| {
+                const detail = if (result.stderr.len > 0) result.stderr else "curl request failed";
                 const msg = try std.fmt.allocPrint(allocator, "curl exited with code {d}: {s}", .{ code, detail });
                 return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            },
-            else => {
-                return ToolResult{ .success = false, .output = "", .error_msg = "curl terminated by signal" };
-            },
+            }
+            return ToolResult{ .success = false, .output = "", .error_msg = "curl terminated by signal" };
         }
 
-        if (raw_body.len == 0) {
+        if (result.stdout.len == 0) {
             const msg = try allocator.dupe(u8, "Page returned empty response");
             return ToolResult{ .success = true, .output = msg };
         }
 
         // Truncate to MAX_READ_BYTES
-        const truncated = raw_body.len > MAX_READ_BYTES;
-        const body_len = if (truncated) MAX_READ_BYTES else raw_body.len;
+        const truncated = result.stdout.len > MAX_READ_BYTES;
+        const body_len = if (truncated) MAX_READ_BYTES else result.stdout.len;
         const suffix: []const u8 = if (truncated) "\n\n[Content truncated to 8 KB]" else "";
 
-        const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ raw_body[0..body_len], suffix });
+        const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ result.stdout[0..body_len], suffix });
         return ToolResult{ .success = true, .output = output };
     }
 };
@@ -343,4 +304,40 @@ test "browser tool execute with empty json" {
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     try std.testing.expect(!result.success);
+}
+
+test "browser open rejects URL with shell metacharacters on Windows" {
+    // On Windows, cmd.exe /c start interprets metacharacters — they must be blocked.
+    // On Unix, open/xdg-open uses execvp so metacharacters in argv are safe.
+    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var bt = BrowserTool{};
+    const t = bt.tool();
+
+    // & can chain commands in cmd.exe
+    const p1 = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com&whoami\"}");
+    defer p1.deinit();
+    const r1 = try t.execute(std.testing.allocator, p1.value.object);
+    try std.testing.expect(!r1.success);
+    try std.testing.expect(std.mem.indexOf(u8, r1.error_msg.?, "metacharacter") != null);
+
+    // | can pipe in cmd.exe
+    const p2 = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com|calc\"}");
+    defer p2.deinit();
+    const r2 = try t.execute(std.testing.allocator, p2.value.object);
+    try std.testing.expect(!r2.success);
+}
+
+test "browser open allows URL with query params on Unix" {
+    // On Unix, & in query strings is safe (passed as argv to open/xdg-open).
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+
+    var bt = BrowserTool{};
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com/search?a=1&b=2\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "example.com") != null);
 }

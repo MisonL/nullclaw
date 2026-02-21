@@ -11,12 +11,13 @@ const MemoryEntry = mem_root.MemoryEntry;
 pub const MemoryRecallTool = struct {
     memory: ?Memory = null,
 
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "memory_recall";
+    pub const tool_description = "Search long-term memory for relevant facts, preferences, or context.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"query":{"type":"string","description":"Keywords or phrase to search for in memory"},"limit":{"type":"integer","description":"Max results to return (default: 5)"}},"required":["query"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *MemoryRecallTool) Tool {
         return .{
@@ -25,26 +26,7 @@ pub const MemoryRecallTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *MemoryRecallTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "memory_recall";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Search long-term memory for relevant facts, preferences, or context.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"query":{"type":"string","description":"Keywords or phrase to search for in memory"},"limit":{"type":"integer","description":"Max results to return (default: 5)"}},"required":["query"]}
-        ;
-    }
-
-    fn execute(self: *MemoryRecallTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *MemoryRecallTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const query = root.getString(args, "query") orelse
             return ToolResult.fail("Missing 'query' parameter");
 

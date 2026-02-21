@@ -253,8 +253,8 @@ pub const OllamaProvider = struct {
     ) anyerror![]const u8 {
         const self: *OllamaProvider = @ptrCast(@alignCast(ptr));
 
-        const url = try self.chatUrl(allocator);
-        defer allocator.free(url);
+        var url_buf: [2048]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "{s}/api/chat", .{self.base_url}) catch return error.OllamaApiError;
 
         const body = try buildRequestBody(allocator, system_prompt, message, model, temperature);
         defer allocator.free(body);
@@ -274,8 +274,8 @@ pub const OllamaProvider = struct {
     ) anyerror!ChatResponse {
         const self: *OllamaProvider = @ptrCast(@alignCast(ptr));
 
-        const url = try self.chatUrl(allocator);
-        defer allocator.free(url);
+        var url_buf: [2048]u8 = undefined;
+        const url = std.fmt.bufPrint(&url_buf, "{s}/api/chat", .{self.base_url}) catch return error.OllamaApiError;
 
         const body = try buildChatRequestBody(allocator, request, model, temperature);
         defer allocator.free(body);

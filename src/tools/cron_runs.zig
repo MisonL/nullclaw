@@ -9,12 +9,13 @@ const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// Cron runs tool — shows execution history for a cron job.
 pub const CronRunsTool = struct {
-    const vtable = Tool.VTable{
-        .execute = &vtableExecute,
-        .name = &vtableName,
-        .description = &vtableDesc,
-        .parameters_json = &vtableParams,
-    };
+    pub const tool_name = "cron_runs";
+    pub const tool_description = "List recent execution history for a cron job.";
+    pub const tool_params =
+        \\{"type":"object","properties":{"job_id":{"type":"string","description":"ID of the cron job"},"limit":{"type":"integer","description":"Max runs to show (default 10)"}},"required":["job_id"]}
+    ;
+
+    const vtable = root.ToolVTable(@This());
 
     pub fn tool(self: *CronRunsTool) Tool {
         return .{
@@ -23,26 +24,7 @@ pub const CronRunsTool = struct {
         };
     }
 
-    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
-        const self: *CronRunsTool = @ptrCast(@alignCast(ptr));
-        return self.execute(allocator, args);
-    }
-
-    fn vtableName(_: *anyopaque) []const u8 {
-        return "cron_runs";
-    }
-
-    fn vtableDesc(_: *anyopaque) []const u8 {
-        return "List recent execution history for a cron job.";
-    }
-
-    fn vtableParams(_: *anyopaque) []const u8 {
-        return 
-        \\{"type":"object","properties":{"job_id":{"type":"string","description":"ID of the cron job"},"limit":{"type":"integer","description":"Max runs to show (default 10)"}},"required":["job_id"]}
-        ;
-    }
-
-    fn execute(_: *CronRunsTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(_: *CronRunsTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const job_id = root.getString(args, "job_id") orelse
             return ToolResult.fail("Missing 'job_id' parameter");
 
