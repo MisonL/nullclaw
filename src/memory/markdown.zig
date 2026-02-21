@@ -28,11 +28,11 @@ pub const MarkdownMemory = struct {
     pub fn deinit(_: *Self) void {}
 
     fn corePath(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(allocator, "{s}/MEMORY.md", .{self.workspace_dir});
+        return std.fs.path.join(allocator, &.{ self.workspace_dir, "MEMORY.md" });
     }
 
     fn memoryDir(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
-        return std.fmt.allocPrint(allocator, "{s}/memory", .{self.workspace_dir});
+        return std.fs.path.join(allocator, &.{ self.workspace_dir, "memory" });
     }
 
     fn dailyPath(self: *const Self, allocator: std.mem.Allocator) ![]u8 {
@@ -42,17 +42,17 @@ pub const MarkdownMemory = struct {
         const day = es.getEpochDay().calculateYearDay();
         const md = day.calculateMonthDay();
 
-        return std.fmt.allocPrint(allocator, "{s}/memory/{d:0>4}-{d:0>2}-{d:0>2}.md", .{
-            self.workspace_dir,
+        const filename = try std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}.md", .{
             day.year,
             @intFromEnum(md.month),
             md.day_index + 1,
         });
+        defer allocator.free(filename);
+        return std.fs.path.join(allocator, &.{ self.workspace_dir, "memory", filename });
     }
 
     fn ensureDir(path: []const u8) !void {
-        if (std.mem.lastIndexOfScalar(u8, path, '/')) |idx| {
-            const dir = path[0..idx];
+        if (std.fs.path.dirname(path)) |dir| {
             std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
                 error.PathAlreadyExists => {},
                 else => return err,
@@ -149,7 +149,7 @@ pub const MarkdownMemory = struct {
             var it = dir.iterate();
             while (try it.next()) |entry| {
                 if (!std.mem.endsWith(u8, entry.name, ".md")) continue;
-                const fpath = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ md, entry.name });
+                const fpath = try std.fs.path.join(allocator, &.{ md, entry.name });
                 defer allocator.free(fpath);
                 if (std.fs.cwd().readFileAlloc(allocator, fpath, 1024 * 1024)) |content| {
                     defer allocator.free(content);
@@ -339,7 +339,13 @@ pub const MarkdownMemory = struct {
 // ── Tests ──────────────────────────────────────────────────────────
 
 test "markdown forget always returns false" {
-    var mem = try MarkdownMemory.init(std.testing.allocator, "/tmp/nullclaw-test-md-forget");
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    var mem = try MarkdownMemory.init(allocator, base);
     defer mem.deinit();
     const m = mem.memory();
 
@@ -424,7 +430,13 @@ test "markdown parseEntries preserves category" {
 }
 
 test "markdown accepts session_id param" {
-    var mem = try MarkdownMemory.init(std.testing.allocator, "/tmp/nullclaw-test-md-session");
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+
+    var mem = try MarkdownMemory.init(allocator, base);
     defer mem.deinit();
     const m = mem.memory();
 

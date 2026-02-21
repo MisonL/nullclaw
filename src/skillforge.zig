@@ -431,7 +431,7 @@ pub fn integrate(allocator: std.mem.Allocator, candidate: SkillCandidate, skills
     };
 
     // Build target path: skills_dir/NAME
-    const target_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ skills_dir, safe_name });
+    const target_path = try std.fs.path.join(allocator, &.{ skills_dir, safe_name });
     defer allocator.free(target_path);
 
     // Clone the repository using git
@@ -502,7 +502,7 @@ pub fn integrate(allocator: std.mem.Allocator, candidate: SkillCandidate, skills
 /// Check if a file exists in a directory.
 fn hasFile(dir_path: []const u8, filename: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const full = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, filename }) catch return false;
+    const full = std.fmt.bufPrint(&buf, "{s}{s}{s}", .{ dir_path, std.fs.path.sep_str, filename }) catch return false;
     std.fs.accessAbsolute(full, .{}) catch return false;
     return true;
 }

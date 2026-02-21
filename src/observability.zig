@@ -728,13 +728,29 @@ test "createObserver factory" {
 }
 
 test "FileObserver name" {
-    var file_obs = FileObserver{ .path = "/tmp/nullclaw_test_obs.jsonl" };
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const path = try std.fs.path.join(allocator, &.{ base, "nullclaw_test_obs.jsonl" });
+    defer allocator.free(path);
+
+    var file_obs = FileObserver{ .path = path };
     const obs = file_obs.observer();
     try std.testing.expectEqualStrings("file", obs.getName());
 }
 
 test "FileObserver does not panic on events" {
-    var file_obs = FileObserver{ .path = "/tmp/nullclaw_test_obs.jsonl" };
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const path = try std.fs.path.join(allocator, &.{ base, "nullclaw_test_obs.jsonl" });
+    defer allocator.free(path);
+
+    var file_obs = FileObserver{ .path = path };
     const obs = file_obs.observer();
     const event = ObserverEvent{ .heartbeat_tick = {} };
     obs.recordEvent(&event);
@@ -744,7 +760,15 @@ test "FileObserver does not panic on events" {
 }
 
 test "FileObserver handles all event types" {
-    var file_obs = FileObserver{ .path = "/tmp/nullclaw_test_obs2.jsonl" };
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const path = try std.fs.path.join(allocator, &.{ base, "nullclaw_test_obs2.jsonl" });
+    defer allocator.free(path);
+
+    var file_obs = FileObserver{ .path = path };
     const obs = file_obs.observer();
     const events = [_]ObserverEvent{
         .{ .agent_start = .{ .provider = "test", .model = "test" } },
@@ -923,10 +947,18 @@ test "createObserver case sensitive" {
 
 test "Observer interface dispatches correctly" {
     // Verify the vtable pattern works through the Observer interface
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const path = try std.fs.path.join(allocator, &.{ base, "nullclaw_dispatch_test.jsonl" });
+    defer allocator.free(path);
+
     var noop = NoopObserver{};
     var log_obs = LogObserver{};
     var verbose = VerboseObserver{};
-    var file_obs = FileObserver{ .path = "/tmp/nullclaw_dispatch_test.jsonl" };
+    var file_obs = FileObserver{ .path = path };
 
     const observers = [_]Observer{ noop.observer(), log_obs.observer(), verbose.observer(), file_obs.observer() };
     const expected_names = [_][]const u8{ "noop", "log", "verbose", "file" };
