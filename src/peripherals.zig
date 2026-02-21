@@ -93,13 +93,62 @@ const allowed_serial_prefixes = [_][]const u8{
     "/dev/cu.usbserial",
 };
 
-pub fn isSerialPathAllowed(path: []const u8) bool {
+const max_linux_serial_symlink_depth: usize = 2;
+
+fn matchesAllowedSerialPrefix(path: []const u8) bool {
     for (allowed_serial_prefixes) |prefix| {
         if (path.len >= prefix.len and std.mem.eql(u8, path[0..prefix.len], prefix)) {
-            return true;
+            return isSafeSerialSuffix(path[prefix.len..]);
         }
     }
     return false;
+}
+
+fn isSafeSerialSuffix(suffix: []const u8) bool {
+    if (suffix.len == 0) return false;
+    for (suffix) |c| {
+        if (c == 0 or c == '/' or c == '\\') return false;
+        if (!(std.ascii.isAlphanumeric(c) or c == '.' or c == '-' or c == '_')) return false;
+    }
+    return true;
+}
+
+fn exceedsLinuxSerialSymlinkDepth(path: []const u8) bool {
+    if (comptime builtin.os.tag != .linux) return false;
+
+    var current_path = std.heap.page_allocator.dupe(u8, path) catch return true;
+    defer std.heap.page_allocator.free(current_path);
+
+    var depth: usize = 0;
+    var target_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    while (true) {
+        const target = std.fs.readLinkAbsolute(current_path, &target_buf) catch |err| switch (err) {
+            error.NotLink, error.FileNotFound => return false,
+            error.SymLinkLoop => return true,
+            else => return true,
+        };
+
+        depth += 1;
+        if (depth > max_linux_serial_symlink_depth) return true;
+
+        const next_path = if (std.fs.path.isAbsolute(target))
+            (std.heap.page_allocator.dupe(u8, target) catch return true)
+        else blk: {
+            const parent = std.fs.path.dirname(current_path) orelse return true;
+            break :blk std.fs.path.resolve(std.heap.page_allocator, &.{ parent, target }) catch return true;
+        };
+        std.heap.page_allocator.free(current_path);
+        current_path = next_path;
+    }
+}
+
+pub fn isSerialPathAllowed(path: []const u8) bool {
+    if (!matchesAllowedSerialPrefix(path)) return false;
+    if (comptime builtin.os.tag == .linux) {
+        if (exceedsLinuxSerialSymlinkDepth(path)) return false;
+    }
+    return true;
 }
 
 // ── SerialPeripheral ────────────────────────────────────────────
@@ -1374,6 +1423,36 @@ test "isSerialPathAllowed rejects invalid paths" {
     try std.testing.expect(!isSerialPathAllowed("/dev/sda"));
     try std.testing.expect(!isSerialPathAllowed("/tmp/evil"));
     try std.testing.expect(!isSerialPathAllowed(""));
+    try std.testing.expect(!isSerialPathAllowed("/dev/ttyUSB0/../../etc/passwd"));
+    try std.testing.expect(!isSerialPathAllowed("/dev/ttyUSB0?bad=1"));
+}
+
+test "linux serial symlink depth guard rejects deep chains" {
+    if (comptime builtin.os.tag != .linux) return;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(std.testing.allocator, ".");
+    defer std.testing.allocator.free(base);
+
+    const leaf = try std.fs.path.join(std.testing.allocator, &.{ base, "leaf" });
+    defer std.testing.allocator.free(leaf);
+    const l1 = try std.fs.path.join(std.testing.allocator, &.{ base, "l1" });
+    defer std.testing.allocator.free(l1);
+    const l2 = try std.fs.path.join(std.testing.allocator, &.{ base, "l2" });
+    defer std.testing.allocator.free(l2);
+    const l3 = try std.fs.path.join(std.testing.allocator, &.{ base, "l3" });
+    defer std.testing.allocator.free(l3);
+
+    const leaf_file = try std.fs.createFileAbsolute(leaf, .{ .truncate = true });
+    leaf_file.close();
+
+    try std.fs.symLinkAbsolute(leaf, l3, .{});
+    try std.fs.symLinkAbsolute(l3, l2, .{});
+    try std.fs.symLinkAbsolute(l2, l1, .{});
+
+    try std.testing.expect(exceedsLinuxSerialSymlinkDepth(l1));
 }
 
 // ── Board capabilities tests ────────────────────────────────────
