@@ -522,18 +522,28 @@ fn curlPostOAuth(allocator: std.mem.Allocator, url: []const u8, body: []const u8
     var argv = std.ArrayListUnmanaged([]const u8){};
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{
-        "curl", "-s",                               "-X", "POST",
-        "-H",   "Content-Type: application/json",   "-H", auth_hdr,
-        "-H",   version_hdr,                        "-H", "anthropic-beta: oauth-2025-04-20",
-        "-A",   "claude-cli/2.1.2 (external, cli)", "-d", body,
+        "curl", "-s",                               "-X",            "POST",
+        "-H",   "Content-Type: application/json",   "-H",            auth_hdr,
+        "-H",   version_hdr,                        "-H",            "anthropic-beta: oauth-2025-04-20",
+        "-A",   "claude-cli/2.1.2 (external, cli)", "--data-binary", "@-",
         url,
     });
 
     var child = std.process.Child.init(argv.items, allocator);
+    child.stdin_behavior = .Pipe;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Ignore;
 
     try child.spawn();
+    if (child.stdin) |*stdin_file| {
+        stdin_file.writeAll(body) catch {
+            stdin_file.close();
+            child.stdin = null;
+            return error.CurlFailed;
+        };
+        stdin_file.close();
+        child.stdin = null;
+    }
 
     const stdout = child.stdout.?.readToEndAlloc(allocator, 1024 * 1024) catch return error.CurlReadError;
 
