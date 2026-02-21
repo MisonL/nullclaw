@@ -66,25 +66,44 @@ pub const OpenAiProvider = struct {
         }
     }
 
-    /// Parse text content from an OpenAI chat completions response.
-    pub fn parseTextResponse(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
-        defer parsed.deinit();
-        const root_obj = parsed.value.object;
-
-        if (root_obj.get("choices")) |choices| {
-            if (choices.array.items.len > 0) {
-                if (choices.array.items[0].object.get("message")) |msg| {
-                    if (msg.object.get("content")) |content| {
-                        if (content == .string) {
-                            return try allocator.dupe(u8, content.string);
-                        }
+    fn extractTextFromValue(allocator: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
+        return switch (value) {
+            .string => |s| if (s.len > 0) try allocator.dupe(u8, s) else null,
+            .object => |obj| blk: {
+                if (obj.get("text")) |text_val| {
+                    if (text_val == .string and text_val.string.len > 0) {
+                        break :blk try allocator.dupe(u8, text_val.string);
                     }
                 }
-            }
-        }
+                if (obj.get("content")) |content_val| {
+                    break :blk try extractTextFromValue(allocator, content_val);
+                }
+                break :blk null;
+            },
+            .array => |arr| blk: {
+                var out: std.ArrayListUnmanaged(u8) = .empty;
+                errdefer out.deinit(allocator);
 
-        return error.NoResponseContent;
+                for (arr.items) |item| {
+                    const part = try extractTextFromValue(allocator, item) orelse continue;
+                    defer allocator.free(part);
+                    if (out.items.len > 0) try out.append(allocator, '\n');
+                    try out.appendSlice(allocator, part);
+                }
+
+                if (out.items.len == 0) break :blk null;
+                break :blk try out.toOwnedSlice(allocator);
+            },
+            else => null,
+        };
+    }
+
+    /// Parse text content from an OpenAI chat completions response.
+    pub fn parseTextResponse(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
+        return root.extractContent(allocator, body) catch |err| switch (err) {
+            error.UnexpectedResponse => error.NoResponseContent,
+            else => err,
+        };
     }
 
     /// Parse a native tool-calling response into ChatResponse.
@@ -93,67 +112,105 @@ pub const OpenAiProvider = struct {
         defer parsed.deinit();
         const root_obj = parsed.value.object;
 
+        var content: ?[]const u8 = null;
+        var tool_calls_list: std.ArrayListUnmanaged(ToolCall) = .empty;
+        errdefer {
+            if (content) |c| allocator.free(c);
+            for (tool_calls_list.items) |tc| {
+                allocator.free(tc.id);
+                allocator.free(tc.name);
+                allocator.free(tc.arguments);
+            }
+            tool_calls_list.deinit(allocator);
+        }
+
         if (root_obj.get("choices")) |choices| {
-            if (choices.array.items.len > 0) {
-                const msg = choices.array.items[0].object.get("message") orelse return error.NoResponseContent;
-                const msg_obj = msg.object;
+            if (choices == .array and choices.array.items.len > 0 and choices.array.items[0] == .object) {
+                const choice_obj = choices.array.items[0].object;
+                const msg_obj: ?std.json.ObjectMap = if (choice_obj.get("message")) |msg|
+                    if (msg == .object) msg.object else null
+                else
+                    null;
 
-                var content: ?[]const u8 = null;
-                if (msg_obj.get("content")) |c| {
-                    if (c == .string) {
-                        content = try allocator.dupe(u8, c.string);
+                if (msg_obj) |msg| {
+                    if (msg.get("content")) |c| {
+                        content = try extractTextFromValue(allocator, c);
                     }
-                }
 
-                var tool_calls_list: std.ArrayListUnmanaged(ToolCall) = .empty;
+                    if (msg.get("tool_calls")) |tc_arr| {
+                        if (tc_arr == .array) {
+                            for (tc_arr.array.items) |tc| {
+                                if (tc != .object) continue;
+                                const tc_obj = tc.object;
+                                const id = if (tc_obj.get("id")) |i| (if (i == .string) try allocator.dupe(u8, i.string) else try allocator.dupe(u8, "unknown")) else try allocator.dupe(u8, "unknown");
 
-                if (msg_obj.get("tool_calls")) |tc_arr| {
-                    for (tc_arr.array.items) |tc| {
-                        const tc_obj = tc.object;
-                        const id = if (tc_obj.get("id")) |i| (if (i == .string) try allocator.dupe(u8, i.string) else try allocator.dupe(u8, "unknown")) else try allocator.dupe(u8, "unknown");
+                                if (tc_obj.get("function")) |func| {
+                                    if (func != .object) continue;
+                                    const func_obj = func.object;
+                                    const name = if (func_obj.get("name")) |n| (if (n == .string) try allocator.dupe(u8, n.string) else try allocator.dupe(u8, "")) else try allocator.dupe(u8, "");
+                                    const arguments = if (func_obj.get("arguments")) |a| (if (a == .string) try allocator.dupe(u8, a.string) else try allocator.dupe(u8, "{}")) else try allocator.dupe(u8, "{}");
 
-                        if (tc_obj.get("function")) |func| {
-                            const func_obj = func.object;
-                            const name = if (func_obj.get("name")) |n| (if (n == .string) try allocator.dupe(u8, n.string) else try allocator.dupe(u8, "")) else try allocator.dupe(u8, "");
-                            const arguments = if (func_obj.get("arguments")) |a| (if (a == .string) try allocator.dupe(u8, a.string) else try allocator.dupe(u8, "{}")) else try allocator.dupe(u8, "{}");
-
-                            try tool_calls_list.append(allocator, .{
-                                .id = id,
-                                .name = name,
-                                .arguments = arguments,
-                            });
-                        }
-                    }
-                }
-
-                // Parse usage
-                var usage = TokenUsage{};
-                if (root_obj.get("usage")) |usage_obj| {
-                    if (usage_obj == .object) {
-                        if (usage_obj.object.get("prompt_tokens")) |v| {
-                            if (v == .integer) usage.prompt_tokens = @intCast(v.integer);
-                        }
-                        if (usage_obj.object.get("completion_tokens")) |v| {
-                            if (v == .integer) usage.completion_tokens = @intCast(v.integer);
-                        }
-                        if (usage_obj.object.get("total_tokens")) |v| {
-                            if (v == .integer) usage.total_tokens = @intCast(v.integer);
+                                    try tool_calls_list.append(allocator, .{
+                                        .id = id,
+                                        .name = name,
+                                        .arguments = arguments,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
 
-                const model_str = if (root_obj.get("model")) |m| (if (m == .string) try allocator.dupe(u8, m.string) else try allocator.dupe(u8, "")) else try allocator.dupe(u8, "");
-
-                return .{
-                    .content = content,
-                    .tool_calls = try tool_calls_list.toOwnedSlice(allocator),
-                    .usage = usage,
-                    .model = model_str,
-                };
+                // Fallbacks for OpenAI-compatible variants
+                if (content == null) {
+                    if (choice_obj.get("delta")) |delta| {
+                        if (delta == .object) {
+                            if (delta.object.get("content")) |delta_content| {
+                                content = try extractTextFromValue(allocator, delta_content);
+                            }
+                        }
+                    }
+                }
+                if (content == null) {
+                    if (choice_obj.get("text")) |text| {
+                        if (text == .string and text.string.len > 0) {
+                            content = try allocator.dupe(u8, text.string);
+                        }
+                    }
+                }
             }
         }
 
-        return error.NoResponseContent;
+        if (content == null and tool_calls_list.items.len == 0) {
+            content = root.extractContent(allocator, body) catch null;
+        }
+
+        if (content == null and tool_calls_list.items.len == 0) return error.NoResponseContent;
+
+        // Parse usage
+        var usage = TokenUsage{};
+        if (root_obj.get("usage")) |usage_obj| {
+            if (usage_obj == .object) {
+                if (usage_obj.object.get("prompt_tokens")) |v| {
+                    if (v == .integer) usage.prompt_tokens = @intCast(v.integer);
+                }
+                if (usage_obj.object.get("completion_tokens")) |v| {
+                    if (v == .integer) usage.completion_tokens = @intCast(v.integer);
+                }
+                if (usage_obj.object.get("total_tokens")) |v| {
+                    if (v == .integer) usage.total_tokens = @intCast(v.integer);
+                }
+            }
+        }
+
+        const model_str = if (root_obj.get("model")) |m| (if (m == .string) try allocator.dupe(u8, m.string) else try allocator.dupe(u8, "")) else try allocator.dupe(u8, "");
+
+        return .{
+            .content = content,
+            .tool_calls = try tool_calls_list.toOwnedSlice(allocator),
+            .usage = usage,
+            .model = model_str,
+        };
     }
 
     /// Create a Provider interface from this OpenAiProvider.
@@ -394,6 +451,15 @@ test "parseTextResponse empty choices" {
     try std.testing.expectError(error.NoResponseContent, OpenAiProvider.parseTextResponse(std.testing.allocator, body));
 }
 
+test "parseTextResponse supports delta fallback" {
+    const body =
+        \\{"choices":[{"delta":{"content":"from-delta"}}]}
+    ;
+    const result = try OpenAiProvider.parseTextResponse(std.testing.allocator, body);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("from-delta", result);
+}
+
 test "parseNativeResponse with tool calls" {
     const body =
         \\{"choices":[{"message":{"content":"Let me help","tool_calls":[{"id":"call_1","type":"function","function":{"name":"shell","arguments":"{\"cmd\":\"ls\"}"}}]}}],"model":"gpt-4o","usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}
@@ -415,6 +481,32 @@ test "parseNativeResponse with tool calls" {
     try std.testing.expectEqualStrings("call_1", response.tool_calls[0].id);
     try std.testing.expect(response.usage.prompt_tokens == 5);
     try std.testing.expect(response.usage.total_tokens == 15);
+}
+
+test "parseNativeResponse supports delta content without message" {
+    const body =
+        \\{"choices":[{"delta":{"content":"delta text"}}],"model":"qwen3-max"}
+    ;
+    const response = try OpenAiProvider.parseNativeResponse(std.testing.allocator, body);
+    defer {
+        if (response.content) |c_val| std.testing.allocator.free(c_val);
+        std.testing.allocator.free(response.tool_calls);
+        std.testing.allocator.free(response.model);
+    }
+    try std.testing.expectEqualStrings("delta text", response.content.?);
+}
+
+test "parseNativeResponse supports message content array" {
+    const body =
+        \\{"choices":[{"message":{"content":[{"type":"text","text":"line A"},{"type":"text","text":"line B"}]}}],"model":"qwen3-max"}
+    ;
+    const response = try OpenAiProvider.parseNativeResponse(std.testing.allocator, body);
+    defer {
+        if (response.content) |c_val| std.testing.allocator.free(c_val);
+        std.testing.allocator.free(response.tool_calls);
+        std.testing.allocator.free(response.model);
+    }
+    try std.testing.expectEqualStrings("line A\nline B", response.content.?);
 }
 
 test "supportsNativeTools returns true" {

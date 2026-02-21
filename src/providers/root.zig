@@ -1057,28 +1057,88 @@ pub fn curlPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []cons
     return http_util.curlPost(allocator, url, body, headers);
 }
 
+fn extractTextFromJsonValue(allocator: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
+    return switch (value) {
+        .string => |s| if (s.len > 0) try allocator.dupe(u8, s) else null,
+        .object => |obj| blk: {
+            if (obj.get("text")) |text_val| {
+                if (text_val == .string and text_val.string.len > 0) {
+                    break :blk try allocator.dupe(u8, text_val.string);
+                }
+            }
+            if (obj.get("content")) |content_val| {
+                break :blk try extractTextFromJsonValue(allocator, content_val);
+            }
+            break :blk null;
+        },
+        .array => |arr| blk: {
+            var out: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer out.deinit(allocator);
+
+            for (arr.items) |item| {
+                const part = try extractTextFromJsonValue(allocator, item) orelse continue;
+                defer allocator.free(part);
+                if (out.items.len > 0) try out.append(allocator, '\n');
+                try out.appendSlice(allocator, part);
+            }
+
+            if (out.items.len == 0) break :blk null;
+            break :blk try out.toOwnedSlice(allocator);
+        },
+        else => null,
+    };
+}
+
 /// Extract text content from a provider JSON response.
 pub fn extractContent(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
     defer parsed.deinit();
     const root_obj = parsed.value.object;
 
-    // OpenAI/OpenRouter format: choices[0].message.content
+    // OpenAI/OpenRouter format variants:
+    // - choices[0].message.content (string/array/object)
+    // - choices[0].delta.content (stream chunk shape)
+    // - choices[0].text (legacy completions)
     if (root_obj.get("choices")) |choices| {
-        if (choices.array.items.len > 0) {
-            if (choices.array.items[0].object.get("message")) |msg| {
-                if (msg.object.get("content")) |content| {
-                    if (content == .string) return try allocator.dupe(u8, content.string);
+        if (choices == .array and choices.array.items.len > 0 and choices.array.items[0] == .object) {
+            const choice_obj = choices.array.items[0].object;
+
+            if (choice_obj.get("message")) |msg| {
+                if (msg == .object) {
+                    if (msg.object.get("content")) |content| {
+                        if (try extractTextFromJsonValue(allocator, content)) |text| return text;
+                    }
+                }
+            }
+
+            if (choice_obj.get("delta")) |delta| {
+                if (delta == .object) {
+                    if (delta.object.get("content")) |content| {
+                        if (try extractTextFromJsonValue(allocator, content)) |text| return text;
+                    }
+                }
+            }
+
+            if (choice_obj.get("text")) |text| {
+                if (text == .string and text.string.len > 0) {
+                    return try allocator.dupe(u8, text.string);
                 }
             }
         }
     }
 
+    // Responses-like shape: output_text: "..."
+    if (root_obj.get("output_text")) |output_text| {
+        if (output_text == .string and output_text.string.len > 0) {
+            return try allocator.dupe(u8, output_text.string);
+        }
+    }
+
     // Anthropic format: content[0].text
     if (root_obj.get("content")) |content| {
-        if (content.array.items.len > 0) {
+        if (content == .array and content.array.items.len > 0 and content.array.items[0] == .object) {
             if (content.array.items[0].object.get("text")) |text| {
-                if (text == .string) return try allocator.dupe(u8, text.string);
+                if (text == .string and text.string.len > 0) return try allocator.dupe(u8, text.string);
             }
         }
     }
@@ -1210,6 +1270,36 @@ test "convertToolsAnthropic empty tools" {
     defer buf.deinit(alloc);
     try convertToolsAnthropic(&buf, alloc, &.{});
     try std.testing.expectEqualStrings("[]", buf.items);
+}
+
+test "extractContent supports choices delta content" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"choices":[{"delta":{"content":"hello delta"}}]}
+    ;
+    const text = try extractContent(allocator, body);
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("hello delta", text);
+}
+
+test "extractContent supports choices text fallback" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"choices":[{"text":"hello text"}]}
+    ;
+    const text = try extractContent(allocator, body);
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("hello text", text);
+}
+
+test "extractContent supports message content array parts" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"choices":[{"message":{"content":[{"type":"text","text":"line 1"},{"type":"text","text":"line 2"}]}}]}
+    ;
+    const text = try extractContent(allocator, body);
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("line 1\nline 2", text);
 }
 
 test "providerUrl returns correct URLs" {
