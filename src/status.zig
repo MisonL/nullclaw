@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Config = @import("config.zig").Config;
 const locale = @import("locale.zig");
 
@@ -24,11 +25,62 @@ fn configured(v: bool, zh: bool) []const u8 {
     return if (v) "configured" else "not configured";
 }
 
+fn readEnvOwned(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
+    return std.process.getEnvVarOwned(allocator, name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        error.OutOfMemory => null,
+        else => null,
+    };
+}
+
+fn hostOsLabel() []const u8 {
+    return switch (builtin.os.tag) {
+        .windows => "windows",
+        .macos => "macos",
+        .linux => "linux",
+        else => @tagName(builtin.os.tag),
+    };
+}
+
+fn detectShellLabel(allocator: std.mem.Allocator, zh: bool) ![]u8 {
+    if (readEnvOwned(allocator, "MSYSTEM")) |msystem| {
+        defer allocator.free(msystem);
+        return std.fmt.allocPrint(allocator, "Git Bash ({s})", .{msystem});
+    }
+
+    if (builtin.os.tag == .windows) {
+        if (readEnvOwned(allocator, "WT_SESSION")) |wt| {
+            defer allocator.free(wt);
+            return allocator.dupe(u8, "Windows Terminal");
+        }
+    }
+
+    if (readEnvOwned(allocator, "TERM_PROGRAM")) |term_program| {
+        defer allocator.free(term_program);
+        return std.fmt.allocPrint(allocator, "{s}", .{term_program});
+    }
+
+    if (readEnvOwned(allocator, "SHELL")) |shell| {
+        defer allocator.free(shell);
+        return std.fmt.allocPrint(allocator, "{s}", .{shell});
+    }
+
+    if (readEnvOwned(allocator, "ComSpec")) |comspec| {
+        defer allocator.free(comspec);
+        return std.fmt.allocPrint(allocator, "{s}", .{comspec});
+    }
+
+    return allocator.dupe(u8, if (zh) "未知" else "unknown");
+}
+
 pub fn run(allocator: std.mem.Allocator) !void {
     const zh = locale.detect_ui_language() == .zh_cn;
     var buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&buf);
     const w = &bw.interface;
+    const shell_label = try detectShellLabel(allocator, zh);
+    defer allocator.free(shell_label);
+    const host_os = hostOsLabel();
 
     var cfg = Config.load(allocator) catch {
         try w.writeAll(if (zh) "nullclaw 状态（未找到配置，请先运行 `nullclaw onboard`）\n" else "nullclaw Status (no config found -- run `nullclaw onboard` first)\n");
@@ -100,8 +152,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
     // Runtime
     if (zh) {
         try w.print("运行时:      {s}\n", .{cfg.runtime.kind});
+        try w.print("主机系统:    {s}\n", .{host_os});
+        try w.print("终端壳:      {s}\n", .{shell_label});
     } else {
         try w.print("Runtime:     {s}\n", .{cfg.runtime.kind});
+        try w.print("Host OS:     {s}\n", .{host_os});
+        try w.print("Shell:       {s}\n", .{shell_label});
     }
 
     // Gateway
