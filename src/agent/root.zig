@@ -531,12 +531,48 @@ pub const Agent = struct {
                     self.observer.recordEvent(&fail_event);
                     return err;
                 };
-                response = ChatResponse{
-                    .content = stream_result.content,
-                    .tool_calls = &.{},
-                    .usage = stream_result.usage,
-                    .model = stream_result.model,
-                };
+                const stream_empty = stream_result.content == null or stream_result.content.?.len == 0;
+                if (stream_empty) {
+                    // Some OpenAI-compatible gateways acknowledge stream mode but return
+                    // no SSE body. Fall back to one-shot chat so CLI does not go silent.
+                    response = self.provider.chat(
+                        self.allocator,
+                        .{
+                            .messages = messages,
+                            .model = self.model_name,
+                            .temperature = self.temperature,
+                            .max_tokens = self.max_tokens,
+                            .tools = null,
+                            .timeout_secs = self.message_timeout_secs,
+                        },
+                        self.model_name,
+                        self.temperature,
+                    ) catch |err| {
+                        const fail_duration: u64 = @as(u64, @intCast(@max(0, std.time.milliTimestamp() - timer_start)));
+                        const fail_event = ObserverEvent{ .llm_response = .{
+                            .provider = self.provider.getName(),
+                            .model = self.model_name,
+                            .duration_ms = fail_duration,
+                            .success = false,
+                            .error_message = @errorName(err),
+                        } };
+                        self.observer.recordEvent(&fail_event);
+                        return err;
+                    };
+
+                    if (response.content) |text| {
+                        if (text.len > 0 and self.stream_callback != null and self.stream_ctx != null) {
+                            self.stream_callback.?(self.stream_ctx.?, providers.StreamChunk.textDelta(text));
+                        }
+                    }
+                } else {
+                    response = ChatResponse{
+                        .content = stream_result.content,
+                        .tool_calls = &.{},
+                        .usage = stream_result.usage,
+                        .model = stream_result.model,
+                    };
+                }
             } else {
                 response = self.provider.chat(
                     self.allocator,

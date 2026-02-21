@@ -58,6 +58,12 @@ pub fn extractDeltaContent(allocator: std.mem.Allocator, json_str: []const u8) !
     return try allocator.dupe(u8, content.string);
 }
 
+fn fallbackNonSseContent(allocator: std.mem.Allocator, raw_response: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, raw_response, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return root.extractContent(allocator, trimmed) catch null;
+}
+
 /// Run curl in SSE streaming mode and parse output line by line.
 ///
 /// Spawns `curl -s --no-buffer` and reads stdout incrementally.
@@ -134,6 +140,8 @@ pub fn curlStream(
 
     var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
+    var raw_response: std.ArrayListUnmanaged(u8) = .empty;
+    defer raw_response.deinit(allocator);
 
     const file = child.stdout.?;
     var read_buf: [4096]u8 = undefined;
@@ -141,6 +149,7 @@ pub fn curlStream(
     outer: while (true) {
         const n = file.read(&read_buf) catch break;
         if (n == 0) break;
+        try raw_response.appendSlice(allocator, read_buf[0..n]);
 
         for (read_buf[0..n]) |byte| {
             if (byte == '\n') {
@@ -160,6 +169,33 @@ pub fn curlStream(
                 }
             } else {
                 try line_buf.append(allocator, byte);
+            }
+        }
+    }
+
+    // Handle a trailing line without a final '\n'
+    if (line_buf.items.len > 0) {
+        const result = parseSseLine(allocator, line_buf.items) catch .skip;
+        switch (result) {
+            .delta => |text| {
+                defer allocator.free(text);
+                try accumulated.appendSlice(allocator, text);
+                callback(ctx, root.StreamChunk.textDelta(text));
+            },
+            .done => {},
+            .skip => {},
+        }
+        line_buf.clearRetainingCapacity();
+    }
+
+    // Some OpenAI-compatible endpoints ignore stream=true and return one-shot JSON.
+    // In that case, recover content from the same raw response instead of returning blank.
+    if (accumulated.items.len == 0) {
+        if (fallbackNonSseContent(allocator, raw_response.items)) |fallback_text| {
+            defer allocator.free(fallback_text);
+            if (fallback_text.len > 0) {
+                try accumulated.appendSlice(allocator, fallback_text);
+                callback(ctx, root.StreamChunk.textDelta(fallback_text));
             }
         }
     }
@@ -362,6 +398,8 @@ pub fn curlStreamAnthropic(
 
     var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
+    var raw_response: std.ArrayListUnmanaged(u8) = .empty;
+    defer raw_response.deinit(allocator);
 
     var current_event: []const u8 = "";
     var output_tokens: u32 = 0;
@@ -372,6 +410,7 @@ pub fn curlStreamAnthropic(
     outer: while (true) {
         const n = file.read(&read_buf) catch break;
         if (n == 0) break;
+        try raw_response.appendSlice(allocator, read_buf[0..n]);
 
         for (read_buf[0..n]) |byte| {
             if (byte == '\n') {
@@ -400,6 +439,37 @@ pub fn curlStreamAnthropic(
                 line_buf.clearRetainingCapacity();
             } else {
                 try line_buf.append(allocator, byte);
+            }
+        }
+    }
+
+    // Handle a trailing line without a final '\n'
+    if (line_buf.items.len > 0) {
+        const result = parseAnthropicSseLine(allocator, line_buf.items, current_event) catch .skip;
+        switch (result) {
+            .event => |ev| {
+                if (current_event.len > 0) allocator.free(@constCast(current_event));
+                current_event = allocator.dupe(u8, ev) catch "";
+            },
+            .delta => |text| {
+                defer allocator.free(text);
+                try accumulated.appendSlice(allocator, text);
+                callback(ctx, root.StreamChunk.textDelta(text));
+            },
+            .usage => |tokens| output_tokens = tokens,
+            .done => {},
+            .skip => {},
+        }
+        line_buf.clearRetainingCapacity();
+    }
+
+    // Some endpoints may return one-shot JSON even when asked for stream mode.
+    if (accumulated.items.len == 0) {
+        if (fallbackNonSseContent(allocator, raw_response.items)) |fallback_text| {
+            defer allocator.free(fallback_text);
+            if (fallback_text.len > 0) {
+                try accumulated.appendSlice(allocator, fallback_text);
+                callback(ctx, root.StreamChunk.textDelta(fallback_text));
             }
         }
     }
@@ -500,6 +570,22 @@ test "extractDeltaContent without content" {
 test "extractDeltaContent empty content" {
     const result = try extractDeltaContent(std.testing.allocator, "{\"choices\":[{\"delta\":{\"content\":\"\"}}]}");
     try std.testing.expect(result == null);
+}
+
+test "fallbackNonSseContent extracts text from one-shot OpenAI JSON" {
+    const allocator = std.testing.allocator;
+    const raw = "{\"choices\":[{\"message\":{\"content\":\"hello fallback\"}}]}";
+    const content = fallbackNonSseContent(allocator, raw).?;
+    defer allocator.free(content);
+    try std.testing.expectEqualStrings("hello fallback", content);
+}
+
+test "fallbackNonSseContent returns null for SSE payload" {
+    const raw =
+        \\data: {"choices":[{"delta":{"content":"a"}}]}
+        \\data: [DONE]
+    ;
+    try std.testing.expect(fallbackNonSseContent(std.testing.allocator, raw) == null);
 }
 
 test "StreamChunk textDelta token estimate" {
