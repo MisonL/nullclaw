@@ -83,7 +83,7 @@ pub const McpServer = struct {
 
         // Send initialize request
         const init_resp = try self.sendRequest(self.allocator, "initialize",
-            \\{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nullclaw","version":"0.1.0"}}
+            \\{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nullclaw","version":"0.1.1"}}
         );
         defer self.allocator.free(init_resp);
 

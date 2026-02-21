@@ -2,7 +2,7 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const locale = @import("locale.zig");
 
-const version = "0.1.0";
+const version = "0.1.1";
 
 fn enabled_disabled(v: bool, zh: bool) []const u8 {
     if (zh) return if (v) "已启用" else "已禁用";

@@ -1312,7 +1312,7 @@ fn identityTemplate(allocator: std.mem.Allocator, ctx: *const ProjectContext) ![
         \\
         \\name: {s}
         \\engine: nullclaw
-        \\version: 0.1.0
+        \\version: 0.1.1
         \\
     , .{ctx.agent_name});
 }
