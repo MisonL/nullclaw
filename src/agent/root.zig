@@ -4,6 +4,7 @@
 //! system prompt construction, history management, single and interactive modes.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.agent);
 const Config = @import("../config.zig").Config;
 const providers = @import("../providers/root.zig");
@@ -57,6 +58,11 @@ const CONTEXT_RECOVERY_MIN_HISTORY: usize = 6;
 
 /// Number of recent messages to keep during force compression.
 const CONTEXT_RECOVERY_KEEP: usize = 4;
+
+const NormalizedCliLine = struct {
+    text: []const u8,
+    owned: bool,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
@@ -1076,6 +1082,100 @@ fn cliStreamCallback(_: *anyopaque, chunk: providers.StreamChunk) void {
     wr.flush() catch {};
 }
 
+fn decodeWindowsBytesToUtf8(allocator: std.mem.Allocator, code_page: u32, bytes: []const u8) ?[]u8 {
+    if (builtin.os.tag != .windows) return null;
+    if (bytes.len == 0) return null;
+
+    const c_int_max: usize = @intCast(std.math.maxInt(c_int));
+    if (bytes.len > c_int_max) return null;
+    const byte_len: c_int = @intCast(bytes.len);
+
+    const Win = struct {
+        extern "kernel32" fn MultiByteToWideChar(
+            code_page: u32,
+            flags: u32,
+            multi_byte_str: [*]const u8,
+            multi_byte_len: c_int,
+            wide_char_str: ?[*]u16,
+            wide_char_len: c_int,
+        ) callconv(.winapi) c_int;
+
+        extern "kernel32" fn WideCharToMultiByte(
+            code_page: u32,
+            flags: u32,
+            wide_char_str: [*]const u16,
+            wide_char_len: c_int,
+            multi_byte_str: ?[*]u8,
+            multi_byte_len: c_int,
+            default_char: ?[*:0]const u8,
+            used_default_char: ?*i32,
+        ) callconv(.winapi) c_int;
+    };
+
+    const wide_len = Win.MultiByteToWideChar(code_page, 0, bytes.ptr, byte_len, null, 0);
+    if (wide_len <= 0) return null;
+
+    const wide: []u16 = allocator.alloc(u16, @intCast(wide_len)) catch return null;
+    defer allocator.free(wide);
+
+    const converted_wide = Win.MultiByteToWideChar(code_page, 0, bytes.ptr, byte_len, wide.ptr, wide_len);
+    if (converted_wide <= 0) return null;
+
+    const utf8_len = Win.WideCharToMultiByte(65001, 0, wide.ptr, converted_wide, null, 0, null, null);
+    if (utf8_len <= 0) return null;
+
+    const utf8: []u8 = allocator.alloc(u8, @intCast(utf8_len)) catch return null;
+    errdefer allocator.free(utf8);
+
+    const converted_utf8 = Win.WideCharToMultiByte(65001, 0, wide.ptr, converted_wide, utf8.ptr, utf8_len, null, null);
+    if (converted_utf8 <= 0) return null;
+
+    if (!std.unicode.utf8ValidateSlice(utf8)) {
+        allocator.free(utf8);
+        return null;
+    }
+    return utf8;
+}
+
+fn lossyBytesToUtf8(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (bytes) |b| {
+        if (b < 0x80) {
+            try out.append(allocator, b);
+        } else {
+            // U+FFFD replacement char for undecodable byte.
+            try out.appendSlice(allocator, &.{ 0xEF, 0xBF, 0xBD });
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
+}
+
+fn normalizeCliLine(allocator: std.mem.Allocator, raw_line: []const u8) !NormalizedCliLine {
+    const trimmed = std.mem.trimRight(u8, raw_line, "\r");
+    if (trimmed.len == 0) return .{ .text = trimmed, .owned = false };
+
+    if (std.unicode.utf8ValidateSlice(trimmed)) {
+        return .{ .text = trimmed, .owned = false };
+    }
+
+    if (builtin.os.tag == .windows) {
+        // Git Bash/MSYS can deliver CP936 bytes for CJK IME input.
+        if (decodeWindowsBytesToUtf8(allocator, 936, trimmed)) |decoded| {
+            return .{ .text = decoded, .owned = true };
+        }
+        // Fallback to current ANSI code page.
+        if (decodeWindowsBytesToUtf8(allocator, 0, trimmed)) |decoded| {
+            return .{ .text = decoded, .owned = true };
+        }
+    }
+
+    // Last resort: replace undecodable bytes so downstream JSON remains valid UTF-8.
+    return .{ .text = try lossyBytesToUtf8(allocator, trimmed), .owned = true };
+}
+
 /// Run the agent in single-message or interactive REPL mode.
 /// This is the main entry point called by `nullclaw agent`.
 pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
@@ -1215,6 +1315,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
         try w.flush();
 
+        const normalized_message = try normalizeCliLine(allocator, message);
+        defer if (normalized_message.owned) allocator.free(normalized_message.text);
+
         var agent = try Agent.fromConfig(allocator, &cfg, provider_i, tools, mem_opt, obs);
         defer agent.deinit();
 
@@ -1225,7 +1328,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             agent.stream_ctx = @ptrCast(&stream_ctx);
         }
 
-        const response = try agent.turn(message);
+        const response = try agent.turn(normalized_message.text);
         defer allocator.free(response);
 
         if (supports_streaming) {
@@ -1309,7 +1412,10 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
             if (line_buf[pos] == '\n') break;
             pos += 1;
         }
-        const line = line_buf[0..pos];
+        const raw_line = line_buf[0..pos];
+        const normalized_line = try normalizeCliLine(allocator, raw_line);
+        defer if (normalized_line.owned) allocator.free(normalized_line.text);
+        const line = normalized_line.text;
 
         if (line.len == 0) continue;
         if (cli_mod.CliChannel.isQuitCommand(line)) return;
@@ -2280,6 +2386,28 @@ test "cliStreamCallback text delta chunk" {
     try std.testing.expectEqualStrings("hello", chunk.delta);
     try std.testing.expect(!chunk.is_final);
     try std.testing.expectEqual(@as(u32, 2), chunk.token_count);
+}
+
+test "normalizeCliLine keeps valid utf8 unchanged" {
+    const allocator = std.testing.allocator;
+    const result = try normalizeCliLine(allocator, "你好");
+    defer if (result.owned) allocator.free(result.text);
+
+    try std.testing.expect(!result.owned);
+    try std.testing.expectEqualStrings("你好", result.text);
+}
+
+test "normalizeCliLine converts GBK bytes on windows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const gbk_hello = [_]u8{ 0xC4, 0xE3, 0xBA, 0xC3 }; // "你好" in GBK/CP936
+    const result = try normalizeCliLine(allocator, &gbk_hello);
+    defer if (result.owned) allocator.free(result.text);
+
+    try std.testing.expect(result.owned);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(result.text));
+    try std.testing.expectEqualStrings("你好", result.text);
 }
 
 // ── Bug regression tests ─────────────────────────────────────────
