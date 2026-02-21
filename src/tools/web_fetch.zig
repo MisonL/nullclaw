@@ -17,13 +17,12 @@ const DEFAULT_MAX_CHARS: usize = 50_000;
 pub const WebFetchTool = struct {
     default_max_chars: usize = DEFAULT_MAX_CHARS,
 
-    pub const tool_name = "web_fetch";
-    pub const tool_description = "Fetch a web page and extract its text content. Converts HTML to readable text with markdown formatting.";
-    pub const tool_params =
-        \\{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch (http or https)"},"max_chars":{"type":"integer","default":50000,"description":"Maximum characters to return"}},"required":["url"]}
-    ;
-
-    const vtable = root.ToolVTable(@This());
+    const vtable = Tool.VTable{
+        .execute = &vtableExecute,
+        .name = &vtableName,
+        .description = &vtableDesc,
+        .parameters_json = &vtableParams,
+    };
 
     pub fn tool(self: *WebFetchTool) Tool {
         return .{
@@ -32,7 +31,26 @@ pub const WebFetchTool = struct {
         };
     }
 
-    pub fn execute(self: *WebFetchTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+        const self: *WebFetchTool = @ptrCast(@alignCast(ptr));
+        return self.execute(allocator, args);
+    }
+
+    fn vtableName(_: *anyopaque) []const u8 {
+        return "web_fetch";
+    }
+
+    fn vtableDesc(_: *anyopaque) []const u8 {
+        return "Fetch a web page and extract its text content. Converts HTML to readable text with markdown formatting.";
+    }
+
+    fn vtableParams(_: *anyopaque) []const u8 {
+        return 
+        \\{"type":"object","properties":{"url":{"type":"string","description":"URL to fetch (http or https)"},"max_chars":{"type":"integer","default":50000,"description":"Maximum characters to return"}},"required":["url"]}
+        ;
+    }
+
+    fn execute(self: *WebFetchTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const url = root.getString(args, "url") orelse
             return ToolResult.fail("Missing required 'url' parameter");
 

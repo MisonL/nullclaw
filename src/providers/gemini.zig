@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("../platform.zig");
 const root = @import("root.zig");
 
 const Provider = root.Provider;
@@ -168,14 +167,14 @@ pub const GeminiProvider = struct {
         // 2. Environment variables (only if no explicit key)
         if (auth == null) {
             if (loadNonEmptyEnv(allocator, "GEMINI_API_KEY")) |value| {
-                allocator.free(value);
+                _ = value;
                 auth = .{ .env_gemini_key = "env" };
             }
         }
 
         if (auth == null) {
             if (loadNonEmptyEnv(allocator, "GOOGLE_API_KEY")) |value| {
-                allocator.free(value);
+                _ = value;
                 auth = .{ .env_google_key = "env" };
             }
         }
@@ -488,11 +487,10 @@ test "provider rejects empty key" {
         .oauth_token => |tok| std.testing.allocator.free(tok),
         else => {},
     };
-    // Empty key must not be accepted as an explicit key — auth source must
-    // NOT be "config". It may fall back to env vars, OAuth, or remain unset
-    // depending on the host environment.
+    // Auth may be "none" or "Gemini CLI OAuth" depending on whether
+    // ~/.gemini/oauth_creds.json exists on the host machine.
     const src = p.authSource();
-    try std.testing.expect(!std.mem.eql(u8, src, "config"));
+    try std.testing.expect(std.mem.eql(u8, src, "none") or std.mem.eql(u8, src, "Gemini CLI OAuth"));
 }
 
 test "api key url includes key query param" {
@@ -607,11 +605,10 @@ test "provider rejects whitespace key" {
         .oauth_token => |tok| std.testing.allocator.free(tok),
         else => {},
     };
-    // Whitespace-only key must not be accepted as an explicit key — auth
-    // source must NOT be "config". It may fall back to env vars, OAuth,
-    // or remain unset depending on the host environment.
+    // Auth may be "none" or "Gemini CLI OAuth" depending on whether
+    // ~/.gemini/oauth_creds.json exists on the host machine.
     const src = p.authSource();
-    try std.testing.expect(!std.mem.eql(u8, src, "config"));
+    try std.testing.expect(std.mem.eql(u8, src, "none") or std.mem.eql(u8, src, "Gemini CLI OAuth"));
 }
 
 test "provider getName returns Gemini" {

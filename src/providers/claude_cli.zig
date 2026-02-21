@@ -156,7 +156,7 @@ pub const ClaudeCliProvider = struct {
     }
 
     /// Health check: run `claude --version` and verify exit code 0.
-    fn healthCheck(allocator: std.mem.Allocator) !void {
+    pub fn healthCheck(allocator: std.mem.Allocator) !void {
         try checkCliVersion(allocator, CLI_NAME);
     }
 };

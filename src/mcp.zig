@@ -8,9 +8,7 @@
 const std = @import("std");
 const tools_mod = @import("tools/root.zig");
 const config_mod = @import("config.zig");
-const json_util = @import("json_util.zig");
-const version = @import("version.zig");
-const platform = @import("platform.zig");
+const yc = @import("root.zig");
 const Allocator = std.mem.Allocator;
 
 const log = std.log.scoped(.mcp);
@@ -63,12 +61,8 @@ pub const McpServer = struct {
         var env = std.process.EnvMap.init(self.allocator);
         // Add PATH, HOME, etc. from parent (cross-platform: works on Windows and POSIX)
         const inherit_vars = [_][]const u8{
-            "PATH",              "HOME",        "TERM",    "LANG",         "LC_ALL",
-            "LC_CTYPE",          "USER",        "SHELL",   "TMPDIR",       "NODE_PATH",
-            "NPM_CONFIG_PREFIX",
-            // Windows-specific
-            "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP",
-            "TMP",               "SYSTEMROOT",  "COMSPEC", "PROGRAMFILES", "WINDIR",
+            "PATH", "HOME",  "TERM",   "LANG",      "LC_ALL",            "LC_CTYPE",
+            "USER", "SHELL", "TMPDIR", "NODE_PATH", "NPM_CONFIG_PREFIX",
         };
         for (&inherit_vars) |key| {
             const val = std.process.getEnvVarOwned(self.allocator, key) catch |err| switch (err) {
@@ -88,14 +82,9 @@ pub const McpServer = struct {
         self.child = child;
 
         // Send initialize request
-        const init_params = try std.fmt.allocPrint(
-            self.allocator,
-            "{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"nullclaw\",\"version\":\"{s}\"}}}}",
-            .{version.string},
+        const init_resp = try self.sendRequest(self.allocator, "initialize",
+            \\{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"nullclaw","version":"0.1.0"}}
         );
-        defer self.allocator.free(init_params);
-
-        const init_resp = try self.sendRequest(self.allocator, "initialize", init_params);
         defer self.allocator.free(init_resp);
 
         // Verify we got a valid response (has protocolVersion in result)
@@ -125,7 +114,7 @@ pub const McpServer = struct {
         var params_buf: std.ArrayListUnmanaged(u8) = .empty;
         defer params_buf.deinit(self.allocator);
         try params_buf.appendSlice(self.allocator, "{\"name\":");
-        try json_util.appendJsonString(&params_buf, self.allocator, tool_name);
+        try yc.json_util.appendJsonString(&params_buf, self.allocator, tool_name);
         try params_buf.appendSlice(self.allocator, ",\"arguments\":");
         try params_buf.appendSlice(self.allocator, args_json);
         try params_buf.append(self.allocator, '}');

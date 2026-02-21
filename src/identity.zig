@@ -1,4 +1,5 @@
 const std = @import("std");
+const Config = @import("config.zig").Config;
 
 /// AIEOS v1.1 identity structure — portable AI identity specification.
 /// Mirrors ZeroClaw's identity.rs with AIEOS JSON parsing and system prompt generation.

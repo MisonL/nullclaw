@@ -126,7 +126,7 @@ pub const CodexCliProvider = struct {
     }
 
     /// Health check: run `codex --version` and verify exit code 0.
-    fn healthCheck(allocator: std.mem.Allocator) !void {
+    pub fn healthCheck(allocator: std.mem.Allocator) !void {
         try checkCliVersion(allocator, CLI_NAME);
     }
 };

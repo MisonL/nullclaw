@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const yc = @import("nullclaw");
 
 pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
@@ -19,7 +18,6 @@ const Command = enum {
     daemon,
     service,
     status,
-    version,
     onboard,
     doctor,
     cron,
@@ -28,7 +26,6 @@ const Command = enum {
     hardware,
     migrate,
     models,
-    auth,
     help,
 };
 
@@ -71,9 +68,6 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "daemon", .daemon },
         .{ "service", .service },
         .{ "status", .status },
-        .{ "version", .version },
-        .{ "--version", .version },
-        .{ "-V", .version },
         .{ "onboard", .onboard },
         .{ "doctor", .doctor },
         .{ "cron", .cron },
@@ -82,7 +76,6 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "hardware", .hardware },
         .{ "migrate", .migrate },
         .{ "models", .models },
-        .{ "auth", .auth },
         .{ "help", .help },
         .{ "--help", .help },
         .{ "-h", .help },
@@ -90,20 +83,10 @@ fn parseCommand(arg: []const u8) ?Command {
     return command_map.get(arg);
 }
 
-var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 pub fn main() !void {
-    // Enable UTF-8 output on Windows console (fixes Cyrillic/Unicode garbling)
-    if (comptime builtin.os.tag == .windows) {
-        _ = std.os.windows.kernel32.SetConsoleOutputCP(65001);
-    }
-
-    const allocator = comptime alloc: {
-        if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) break :alloc debug_allocator.allocator();
-        break :alloc std.heap.smp_allocator;
-    };
-    defer if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
-        _ = debug_allocator.deinit();
-    };
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -126,7 +109,6 @@ pub fn main() !void {
     const sub_args = args[2..];
 
     switch (cmd) {
-        .version => printVersion(),
         .status => try yc.status.run(allocator),
         .agent => try yc.agent.run(allocator, sub_args),
         .onboard => try runOnboard(allocator, sub_args),
@@ -141,15 +123,7 @@ pub fn main() !void {
         .hardware => try runHardware(allocator, sub_args),
         .migrate => try runMigrate(allocator, sub_args),
         .models => try runModels(allocator, sub_args),
-        .auth => try runAuth(allocator, sub_args),
     }
-}
-
-fn printVersion() void {
-    var buf: [256]u8 = undefined;
-    var bw = std.fs.File.stdout().writer(&buf);
-    bw.interface.print("nullclaw {s}\n", .{yc.version.string}) catch return;
-    bw.interface.flush() catch return;
 }
 
 // ── Gateway ──────────────────────────────────────────────────────
@@ -1137,22 +1111,6 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     else
         null;
 
-    // Build security policy from config
-    const security = @import("nullclaw").security.policy;
-    var tracker = security.RateTracker.init(allocator, config.autonomy.max_actions_per_hour);
-    defer tracker.deinit();
-
-    var sec_policy = security.SecurityPolicy{
-        .autonomy = config.autonomy.level,
-        .workspace_dir = config.workspace_dir,
-        .workspace_only = config.autonomy.workspace_only,
-        .allowed_commands = if (config.autonomy.allowed_commands.len > 0) config.autonomy.allowed_commands else &security.default_allowed_commands,
-        .max_actions_per_hour = config.autonomy.max_actions_per_hour,
-        .require_approval_for_medium_risk = config.autonomy.require_approval_for_medium_risk,
-        .block_high_risk_commands = config.autonomy.block_high_risk_commands,
-        .tracker = &tracker,
-    };
-
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -1162,8 +1120,6 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .agents = config.agents,
         .fallback_api_key = config.defaultProviderKey(),
         .tools_config = config.tools,
-        .allowed_paths = config.autonomy.allowed_paths,
-        .policy = &sec_policy,
     }) catch &.{};
     defer if (tools.len > 0) allocator.free(tools);
 
@@ -1190,8 +1146,36 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     const obs = noop_obs.observer();
 
     // Create provider vtable — concrete struct must stay alive for the loop.
-    var holder = yc.providers.ProviderHolder.fromConfig(allocator, config.default_provider, config.defaultProviderKey());
-    const provider_i: yc.providers.Provider = holder.provider();
+    // Use a tagged union so the right type lives on the stack.
+    const ProviderHolder = union(enum) {
+        openrouter: yc.providers.openrouter.OpenRouterProvider,
+        anthropic: yc.providers.anthropic.AnthropicProvider,
+        openai: yc.providers.openai.OpenAiProvider,
+        gemini: yc.providers.gemini.GeminiProvider,
+        ollama: yc.providers.ollama.OllamaProvider,
+    };
+
+    const api_key = config.defaultProviderKey();
+    var holder: ProviderHolder = if (std.mem.eql(u8, config.default_provider, "anthropic"))
+        .{ .anthropic = yc.providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
+    else if (std.mem.eql(u8, config.default_provider, "openai"))
+        .{ .openai = yc.providers.openai.OpenAiProvider.init(allocator, api_key) }
+    else if (std.mem.eql(u8, config.default_provider, "gemini") or
+        std.mem.eql(u8, config.default_provider, "google"))
+        .{ .gemini = yc.providers.gemini.GeminiProvider.init(allocator, api_key) }
+    else if (std.mem.eql(u8, config.default_provider, "ollama"))
+        .{ .ollama = yc.providers.ollama.OllamaProvider.init(allocator, null) }
+    else
+        // Default: OpenRouter (also handles all other provider names)
+        .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
+
+    const provider_i: yc.providers.Provider = switch (holder) {
+        .openrouter => |*p| p.provider(),
+        .anthropic => |*p| p.provider(),
+        .openai => |*p| p.provider(),
+        .gemini => |*p| p.provider(),
+        .ollama => |*p| p.provider(),
+    };
 
     if (zh) {
         std.debug.print("  工具: {d} 个已加载\n", .{tools.len});
@@ -1214,7 +1198,6 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     }
 
     var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs);
-    session_mgr.policy = &sec_policy;
     defer session_mgr.deinit();
 
     var typing = yc.channels.telegram.TypingIndicator.init(&tg);
@@ -1315,320 +1298,6 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     }
 }
 
-// ── Auth ─────────────────────────────────────────────────────────
-
-fn runAuth(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
-    if (sub_args.len < 2) {
-        printAuthUsage();
-        std.process.exit(1);
-    }
-
-    const subcmd = sub_args[0];
-    const provider_name = sub_args[1];
-    const rest = sub_args[2..];
-
-    // Resolve provider-specific constants
-    const codex = yc.providers.openai_codex;
-    const auth_mod = yc.auth;
-
-    if (!std.mem.eql(u8, provider_name, "openai-codex")) {
-        std.debug.print("Unknown auth provider: {s}\n\n", .{provider_name});
-        std.debug.print("Available providers:\n", .{});
-        std.debug.print("  openai-codex    ChatGPT Plus/Pro subscription (OAuth)\n", .{});
-        std.process.exit(1);
-    }
-
-    if (std.mem.eql(u8, subcmd, "login")) {
-        var import_codex = false;
-        for (rest) |arg| {
-            if (std.mem.eql(u8, arg, "--import-codex")) import_codex = true;
-        }
-
-        if (import_codex) {
-            runAuthImportCodex(allocator, codex, auth_mod);
-        } else {
-            runAuthDeviceCodeLogin(allocator, codex, auth_mod);
-        }
-    } else if (std.mem.eql(u8, subcmd, "status")) {
-        if (auth_mod.loadCredential(allocator, codex.CREDENTIAL_KEY) catch null) |token| {
-            defer token.deinit(allocator);
-            std.debug.print("openai-codex: authenticated\n", .{});
-            if (token.expires_at != 0) {
-                const remaining = token.expires_at - std.time.timestamp();
-                if (remaining > 0) {
-                    std.debug.print("  Token expires in: {d}h {d}m\n", .{
-                        @divTrunc(remaining, 3600),
-                        @divTrunc(@mod(remaining, 3600), 60),
-                    });
-                } else {
-                    std.debug.print("  Token: expired (will auto-refresh)\n", .{});
-                }
-            }
-            if (token.refresh_token != null) {
-                std.debug.print("  Refresh token: present\n", .{});
-            }
-            const account_id = codex.extractAccountIdFromJwt(allocator, token.access_token) catch null;
-            defer if (account_id) |id| allocator.free(id);
-            if (account_id) |id| {
-                std.debug.print("  Account: {s}\n", .{id});
-            }
-        } else {
-            std.debug.print("openai-codex: not authenticated\n", .{});
-            std.debug.print("  Run `nullclaw auth login openai-codex` to authenticate.\n", .{});
-        }
-    } else if (std.mem.eql(u8, subcmd, "logout")) {
-        if (auth_mod.deleteCredential(allocator, codex.CREDENTIAL_KEY) catch false) {
-            std.debug.print("openai-codex: credentials removed.\n", .{});
-        } else {
-            std.debug.print("openai-codex: no credentials found.\n", .{});
-        }
-    } else {
-        std.debug.print("Unknown auth command: {s}\n\n", .{subcmd});
-        printAuthUsage();
-        std.process.exit(1);
-    }
-}
-
-fn printAuthUsage() void {
-    std.debug.print(
-        \\Usage: nullclaw auth <command> <provider> [options]
-        \\
-        \\Commands:
-        \\  login <provider>                    Authenticate via device code flow
-        \\  login <provider> --import-codex     Import from Codex CLI (~/.codex/auth.json)
-        \\  status <provider>                   Show authentication status
-        \\  logout <provider>                   Remove stored credentials
-        \\
-        \\Providers:
-        \\  openai-codex    ChatGPT Plus/Pro subscription (OAuth)
-        \\
-        \\Examples:
-        \\  nullclaw auth login openai-codex
-        \\  nullclaw auth login openai-codex --import-codex
-        \\  nullclaw auth status openai-codex
-        \\  nullclaw auth logout openai-codex
-        \\
-    , .{});
-}
-
-fn runAuthDeviceCodeLogin(
-    allocator: std.mem.Allocator,
-    codex: type,
-    auth_mod: type,
-) void {
-    std.debug.print("Starting OpenAI Codex authentication...\n\n", .{});
-
-    const dc = auth_mod.startDeviceCodeFlow(
-        allocator,
-        codex.OAUTH_CLIENT_ID,
-        codex.OAUTH_DEVICE_URL,
-        codex.OAUTH_SCOPE,
-    ) catch {
-        std.debug.print("Failed to start device code flow (likely Cloudflare block).\n", .{});
-        std.debug.print("Alternative:\n", .{});
-        std.debug.print("  nullclaw auth login openai-codex --import-codex   (import from Codex CLI)\n", .{});
-        std.process.exit(1);
-    };
-    defer dc.deinit(allocator);
-
-    std.debug.print("Open this URL in your browser:\n", .{});
-    std.debug.print("  {s}\n\n", .{dc.verification_uri});
-    std.debug.print("Enter code: {s}\n\n", .{dc.user_code});
-    std.debug.print("Waiting for authorization...\n", .{});
-
-    const token = auth_mod.pollDeviceCode(
-        allocator,
-        codex.OAUTH_TOKEN_URL,
-        codex.OAUTH_CLIENT_ID,
-        dc.device_code,
-        dc.interval,
-    ) catch |err| {
-        switch (err) {
-            error.DeviceCodeDenied => std.debug.print("Authorization denied.\n", .{}),
-            error.DeviceCodeTimeout => std.debug.print("Authorization timed out.\n", .{}),
-            else => std.debug.print("Authorization failed: {}\n", .{err}),
-        }
-        std.process.exit(1);
-    };
-    defer token.deinit(allocator);
-
-    saveAndPrintResult(allocator, codex, auth_mod, token);
-}
-
-fn runAuthImportCodex(
-    allocator: std.mem.Allocator,
-    codex: type,
-    auth_mod: type,
-) void {
-    const home = yc.platform.getHomeDir(allocator) catch {
-        std.debug.print("HOME not set.\n", .{});
-        std.process.exit(1);
-    };
-    defer allocator.free(home);
-
-    const path = std.fs.path.join(allocator, &.{ home, ".codex", "auth.json" }) catch {
-        std.debug.print("Out of memory.\n", .{});
-        std.process.exit(1);
-    };
-    defer allocator.free(path);
-
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        std.debug.print("Could not open {s}\n", .{path});
-        std.debug.print("Install and authenticate with Codex CLI first.\n", .{});
-        std.process.exit(1);
-    };
-    defer file.close();
-
-    const json_bytes = file.readToEndAlloc(allocator, 1024 * 1024) catch {
-        std.debug.print("Failed to read {s}\n", .{path});
-        std.process.exit(1);
-    };
-    defer allocator.free(json_bytes);
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch {
-        std.debug.print("Failed to parse {s}\n", .{path});
-        std.process.exit(1);
-    };
-    defer parsed.deinit();
-
-    const root_obj = switch (parsed.value) {
-        .object => |o| o,
-        else => {
-            std.debug.print("Invalid format in {s}\n", .{path});
-            std.process.exit(1);
-        },
-    };
-
-    // Extract tokens object
-    const tokens_val = root_obj.get("tokens") orelse {
-        std.debug.print("No \"tokens\" field in {s}\n", .{path});
-        std.process.exit(1);
-    };
-    const tokens_obj = switch (tokens_val) {
-        .object => |o| o,
-        else => {
-            std.debug.print("Invalid \"tokens\" field in {s}\n", .{path});
-            std.process.exit(1);
-        },
-    };
-
-    const access_token_str = switch (tokens_obj.get("access_token") orelse {
-        std.debug.print("No access_token in Codex CLI credentials.\n", .{});
-        std.process.exit(1);
-    }) {
-        .string => |s| s,
-        else => {
-            std.debug.print("Invalid access_token in Codex CLI credentials.\n", .{});
-            std.process.exit(1);
-        },
-    };
-
-    if (access_token_str.len == 0) {
-        std.debug.print("Empty access_token in Codex CLI credentials.\n", .{});
-        std.process.exit(1);
-    }
-
-    const refresh_token_str: ?[]const u8 = if (tokens_obj.get("refresh_token")) |rt_val| switch (rt_val) {
-        .string => |s| if (s.len > 0) s else null,
-        else => null,
-    } else null;
-
-    // Decode JWT exp from access_token
-    const expires_at = decodeJwtExp(allocator, access_token_str);
-
-    const token = auth_mod.OAuthToken{
-        .access_token = access_token_str,
-        .refresh_token = refresh_token_str,
-        .expires_at = expires_at,
-        .token_type = "Bearer",
-    };
-
-    auth_mod.saveCredential(allocator, codex.CREDENTIAL_KEY, token) catch {
-        std.debug.print("Failed to save credential.\n", .{});
-        std.process.exit(1);
-    };
-
-    const account_id = codex.extractAccountIdFromJwt(allocator, access_token_str) catch null;
-    defer if (account_id) |id| allocator.free(id);
-
-    std.debug.print("Imported from Codex CLI ({s})\n", .{path});
-    if (account_id) |id| {
-        std.debug.print("  Account: {s}\n", .{id});
-    }
-    std.debug.print("  Access token: {d} bytes\n", .{access_token_str.len});
-    if (refresh_token_str != null) {
-        std.debug.print("  Refresh token: present\n", .{});
-    } else {
-        std.debug.print("  Refresh token: absent\n", .{});
-    }
-    if (expires_at != 0) {
-        const remaining = expires_at - std.time.timestamp();
-        if (remaining > 0) {
-            std.debug.print("  Expires in: {d}h {d}m\n", .{
-                @divTrunc(remaining, 3600),
-                @divTrunc(@mod(remaining, 3600), 60),
-            });
-        } else {
-            std.debug.print("  Token: expired (will auto-refresh)\n", .{});
-        }
-    }
-    std.debug.print("\nTo use: set \"default_provider\": \"openai-codex\" in ~/.nullclaw/config.json\n", .{});
-}
-
-/// Decode the "exp" claim from a JWT, returning the Unix timestamp or 0 if not decodable.
-fn decodeJwtExp(allocator: std.mem.Allocator, token: []const u8) i64 {
-    const first_dot = std.mem.indexOfScalar(u8, token, '.') orelse return 0;
-    const rest = token[first_dot + 1 ..];
-    const second_dot = std.mem.indexOfScalar(u8, rest, '.') orelse return 0;
-    const payload_b64 = rest[0..second_dot];
-    if (payload_b64.len == 0) return 0;
-
-    const Decoder = std.base64.url_safe_no_pad.Decoder;
-    const decoded_len = Decoder.calcSizeForSlice(payload_b64) catch return 0;
-    const decoded = allocator.alloc(u8, decoded_len) catch return 0;
-    defer allocator.free(decoded);
-    Decoder.decode(decoded, payload_b64) catch return 0;
-
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, decoded, .{}) catch return 0;
-    defer parsed.deinit();
-
-    const obj = switch (parsed.value) {
-        .object => |o| o,
-        else => return 0,
-    };
-
-    if (obj.get("exp")) |exp_val| {
-        switch (exp_val) {
-            .integer => |i| return i,
-            .float => |f| return @intFromFloat(f),
-            else => {},
-        }
-    }
-    return 0;
-}
-
-fn saveAndPrintResult(
-    allocator: std.mem.Allocator,
-    codex: type,
-    auth_mod: type,
-    token: auth_mod.OAuthToken,
-) void {
-    auth_mod.saveCredential(allocator, codex.CREDENTIAL_KEY, token) catch {
-        std.debug.print("Failed to save credential.\n", .{});
-        std.process.exit(1);
-    };
-
-    const account_id = codex.extractAccountIdFromJwt(allocator, token.access_token) catch null;
-    defer if (account_id) |id| allocator.free(id);
-
-    if (account_id) |id| {
-        std.debug.print("Authenticated (account: {s})\n", .{id});
-    } else {
-        std.debug.print("Authenticated successfully.\n", .{});
-    }
-    std.debug.print("\nTo use: set \"default_provider\": \"openai-codex\" in ~/.nullclaw/config.json\n", .{});
-}
-
 fn printUsage() void {
     const usage_en =
         \\nullclaw -- The smallest AI assistant. Zig-powered.
@@ -1643,7 +1312,6 @@ fn printUsage() void {
         \\  daemon      Start long-running runtime (gateway + channels + heartbeat)
         \\  service     Manage OS service lifecycle (install/start/stop/status/uninstall)
         \\  status      Show system status
-        \\  version     Show CLI version
         \\  doctor      Run diagnostics
         \\  cron        Manage scheduled tasks
         \\  channel     Manage channels (Telegram, Discord, Slack, ...)
@@ -1651,7 +1319,6 @@ fn printUsage() void {
         \\  hardware    Discover and manage hardware
         \\  migrate     Migrate data from other agent runtimes
         \\  models      Manage provider model catalogs
-        \\  auth        Manage OAuth authentication (OpenAI Codex)
         \\  help        Show this help
         \\
         \\OPTIONS:
@@ -1659,7 +1326,6 @@ fn printUsage() void {
         \\  agent [-m MESSAGE] [-s SESSION] [--provider PROVIDER] [--model MODEL] [--temperature TEMP]
         \\  gateway [--port PORT] [--host HOST]
         \\  daemon [--port PORT] [--host HOST]
-        \\  version | --version | -V
         \\  service <install|start|stop|status|uninstall>
         \\  cron <list|add|once|remove|pause|resume> [ARGS]
         \\  channel <list|start|doctor|add|remove> [ARGS]
@@ -1667,7 +1333,6 @@ fn printUsage() void {
         \\  hardware <discover|introspect|info> [ARGS]
         \\  migrate openclaw [--dry-run] [--source PATH]
         \\  models refresh
-        \\  auth <login|status|logout> <provider> [--import-codex]
         \\
     ;
     const usage_zh =
@@ -1716,12 +1381,8 @@ fn printUsage() void {
 test "parse known commands" {
     try std.testing.expectEqual(.agent, parseCommand("agent").?);
     try std.testing.expectEqual(.status, parseCommand("status").?);
-    try std.testing.expectEqual(.version, parseCommand("version").?);
-    try std.testing.expectEqual(.version, parseCommand("--version").?);
-    try std.testing.expectEqual(.version, parseCommand("-V").?);
     try std.testing.expectEqual(.service, parseCommand("service").?);
     try std.testing.expectEqual(.migrate, parseCommand("migrate").?);
     try std.testing.expectEqual(.models, parseCommand("models").?);
-    try std.testing.expectEqual(.auth, parseCommand("auth").?);
     try std.testing.expect(parseCommand("unknown") == null);
 }

@@ -12,13 +12,12 @@ const JsonObjectMap = root.JsonObjectMap;
 pub const BrowserOpenTool = struct {
     allowed_domains: []const []const u8,
 
-    pub const tool_name = "browser_open";
-    pub const tool_description = "Open an approved HTTPS URL in the default browser. Only allowlisted domains are permitted.";
-    pub const tool_params =
-        \\{"type":"object","properties":{"url":{"type":"string","description":"HTTPS URL to open in browser"}},"required":["url"]}
-    ;
-
-    const vtable = root.ToolVTable(@This());
+    const vtable = Tool.VTable{
+        .execute = &vtableExecute,
+        .name = &vtableName,
+        .description = &vtableDesc,
+        .parameters_json = &vtableParams,
+    };
 
     pub fn tool(self: *BrowserOpenTool) Tool {
         return .{
@@ -27,7 +26,26 @@ pub const BrowserOpenTool = struct {
         };
     }
 
-    pub fn execute(self: *BrowserOpenTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+        const self: *BrowserOpenTool = @ptrCast(@alignCast(ptr));
+        return self.execute(allocator, args);
+    }
+
+    fn vtableName(_: *anyopaque) []const u8 {
+        return "browser_open";
+    }
+
+    fn vtableDesc(_: *anyopaque) []const u8 {
+        return "Open an approved HTTPS URL in the default browser. Only allowlisted domains are permitted.";
+    }
+
+    fn vtableParams(_: *anyopaque) []const u8 {
+        return 
+        \\{"type":"object","properties":{"url":{"type":"string","description":"HTTPS URL to open in browser"}},"required":["url"]}
+        ;
+    }
+
+    fn execute(self: *BrowserOpenTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const url = root.getString(args, "url") orelse
             return ToolResult.fail("Missing 'url' parameter");
 
@@ -74,15 +92,24 @@ pub const BrowserOpenTool = struct {
             },
         };
 
-        const proc = @import("process_util.zig");
-        const result = proc.run(allocator, argv, .{}) catch {
+        var child = std.process.Child.init(argv, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        child.spawn() catch {
             return ToolResult.fail("Failed to spawn browser command");
         };
-        result.deinit(allocator);
 
-        if (result.success) {
-            const msg = try std.fmt.allocPrint(allocator, "Opened in browser: {s}", .{url});
-            return ToolResult{ .success = true, .output = msg };
+        const term = child.wait() catch {
+            return ToolResult.fail("Failed to wait for browser command");
+        };
+
+        switch (term) {
+            .Exited => |code| if (code == 0) {
+                const msg = try std.fmt.allocPrint(allocator, "Opened in browser: {s}", .{url});
+                return ToolResult{ .success = true, .output = msg };
+            },
+            else => {},
         }
         return ToolResult.fail("Browser command failed");
     }

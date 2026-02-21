@@ -1,7 +1,7 @@
-//! Event Bus — inter-component message bus for nullClaw.
+//! Event Bus — межкомпонентная шина сообщений nullClaw.
 //!
-//! Two blocking queues (inbound: channels→agent, outbound: agent→channels)
-//! on a ring buffer with Mutex+Condition. Foundation for Session Manager,
+//! Две блокирующие очереди (inbound: каналы→агент, outbound: агент→каналы)
+//! на ring buffer с Mutex+Condition. Фундамент для Session Manager,
 //! Message tool, Heartbeat execution, Cron dispatch, USB hotplug.
 
 const std = @import("std");
@@ -14,10 +14,10 @@ const testing = std.testing;
 
 pub const InboundMessage = struct {
     channel: []const u8, // "telegram", "discord", "webhook", "system"
-    sender_id: []const u8, // sender identifier
-    chat_id: []const u8, // chat/room identifier
-    content: []const u8, // message text
-    session_key: []const u8, // "channel:chatID" for session lookup
+    sender_id: []const u8, // идентификатор отправителя
+    chat_id: []const u8, // идентификатор чата/комнаты
+    content: []const u8, // текст сообщения
+    session_key: []const u8, // "channel:chatID" для lookup сессии
     media: []const []const u8 = &.{}, // file paths/URLs (images, voice, docs)
     metadata_json: ?[]const u8 = null, // channel-specific JSON (message_id, thread_ts, is_group)
 
@@ -34,9 +34,9 @@ pub const InboundMessage = struct {
 };
 
 pub const OutboundMessage = struct {
-    channel: []const u8, // target channel
-    chat_id: []const u8, // target chat
-    content: []const u8, // response text
+    channel: []const u8, // целевой канал
+    chat_id: []const u8, // целевой чат
+    content: []const u8, // текст ответа
     media: []const []const u8 = &.{}, // file paths/URLs to send
 
     pub fn deinit(self: *const OutboundMessage, allocator: Allocator) void {
@@ -113,13 +113,6 @@ pub fn makeInboundFull(
         break :blk arr;
     } else &[_][]const u8{};
 
-    errdefer {
-        if (media.len > 0) {
-            for (media) |m| allocator.free(m);
-            allocator.free(media);
-        }
-    }
-
     const md = if (metadata_json) |mj| try allocator.dupe(u8, mj) else null;
 
     return .{
@@ -152,7 +145,7 @@ pub fn makeOutbound(
 }
 
 /// Create an OutboundMessage with media attachments.
-fn makeOutboundWithMedia(
+pub fn makeOutboundWithMedia(
     allocator: Allocator,
     channel: []const u8,
     chat_id: []const u8,
@@ -207,7 +200,7 @@ pub fn BoundedQueue(comptime T: type, comptime capacity: usize) type {
             return .{};
         }
 
-        /// Blocks if the queue is full. Returns error.Closed if the bus is closed.
+        /// Блокирует если очередь полна. Возвращает error.Closed если шина закрыта.
         pub fn publish(self: *Self, item: T) error{Closed}!void {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -224,7 +217,7 @@ pub fn BoundedQueue(comptime T: type, comptime capacity: usize) type {
             self.not_empty.signal();
         }
 
-        /// Blocks if the queue is empty. Returns null if closed and the queue is empty.
+        /// Блокирует если очередь пуста. Возвращает null если closed и очередь пуста.
         pub fn consume(self: *Self) ?T {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -242,7 +235,7 @@ pub fn BoundedQueue(comptime T: type, comptime capacity: usize) type {
             return item;
         }
 
-        /// Closes the queue, waking all waiting threads.
+        /// Закрывает очередь, будит все ожидающие потоки.
         pub fn close(self: *Self) void {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -251,7 +244,7 @@ pub fn BoundedQueue(comptime T: type, comptime capacity: usize) type {
             self.not_full.broadcast();
         }
 
-        /// Current queue depth (for metrics).
+        /// Текущая глубина очереди (для метрик).
         pub fn depth(self: *Self) usize {
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -274,7 +267,7 @@ pub const Bus = struct {
         return .{};
     }
 
-    // -- Inbound: channels/gateway → agent --
+    // -- Inbound: каналы/gateway → агент --
 
     pub fn publishInbound(self: *Bus, msg: InboundMessage) error{Closed}!void {
         return self.inbound.publish(msg);
@@ -284,7 +277,7 @@ pub const Bus = struct {
         return self.inbound.consume();
     }
 
-    // -- Outbound: agent/cron/heartbeat → channels --
+    // -- Outbound: агент/cron/heartbeat → каналы --
 
     pub fn publishOutbound(self: *Bus, msg: OutboundMessage) error{Closed}!void {
         return self.outbound.publish(msg);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const json_util = @import("../json_util.zig");
 const http_util = @import("../http_util.zig");
+const config_mod = @import("../config_types.zig");
 
 // Re-export all provider sub-modules
 pub const anthropic = @import("anthropic.zig");
@@ -14,47 +15,6 @@ pub const router = @import("router.zig");
 pub const sse = @import("sse.zig");
 pub const claude_cli = @import("claude_cli.zig");
 pub const codex_cli = @import("codex_cli.zig");
-pub const openai_codex = @import("openai_codex.zig");
-
-// Extracted sub-modules
-pub const scrub = @import("scrub.zig");
-pub const api_key = @import("api_key.zig");
-pub const factory = @import("factory.zig");
-pub const helpers = @import("helpers.zig");
-
-// Re-exports from scrub.zig
-pub const scrubSecretPatterns = scrub.scrubSecretPatterns;
-pub const scrubToolOutput = scrub.scrubToolOutput;
-pub const sanitizeApiError = scrub.sanitizeApiError;
-
-// Re-exports from api_key.zig
-pub const resolveApiKey = api_key.resolveApiKey;
-pub const resolveApiKeyFromConfig = api_key.resolveApiKeyFromConfig;
-
-// Re-exports from factory.zig
-pub const ProviderKind = factory.ProviderKind;
-pub const classifyProvider = factory.classifyProvider;
-pub const detectProviderByApiKey = factory.detectProviderByApiKey;
-pub const compatibleProviderUrl = factory.compatibleProviderUrl;
-pub const compatibleProviderDisplayName = factory.compatibleProviderDisplayName;
-pub const ProviderHolder = factory.ProviderHolder;
-
-// Re-exports from helpers.zig
-pub const complete = helpers.complete;
-pub const completeWithSystem = helpers.completeWithSystem;
-pub const providerUrl = helpers.providerUrl;
-pub const buildRequestBody = helpers.buildRequestBody;
-pub const buildRequestBodyWithSystem = helpers.buildRequestBodyWithSystem;
-pub const isReasoningModel = helpers.isReasoningModel;
-pub const appendGenerationFields = helpers.appendGenerationFields;
-pub const convertToolsOpenAI = helpers.convertToolsOpenAI;
-pub const convertToolsAnthropic = helpers.convertToolsAnthropic;
-pub const curlPostTimed = helpers.curlPostTimed;
-pub const extractContent = helpers.extractContent;
-
-// Direct re-exports from utility modules
-pub const appendJsonString = json_util.appendJsonString;
-pub const curlPost = http_util.curlPost;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Core Types
@@ -124,13 +84,11 @@ pub const Role = enum {
     }
 
     pub fn fromSlice(s: []const u8) ?Role {
-        const map = std.StaticStringMap(Role).initComptime(.{
-            .{ "system", .system },
-            .{ "user", .user },
-            .{ "assistant", .assistant },
-            .{ "tool", .tool },
-        });
-        return map.get(s);
+        if (std.mem.eql(u8, s, "system")) return .system;
+        if (std.mem.eql(u8, s, "user")) return .user;
+        if (std.mem.eql(u8, s, "assistant")) return .assistant;
+        if (std.mem.eql(u8, s, "tool")) return .tool;
+        return null;
     }
 };
 
@@ -249,12 +207,10 @@ pub const ChatRequest = struct {
     messages: []const ChatMessage,
     model: []const u8 = "",
     temperature: f64 = 0.7,
-    max_tokens: ?u32 = null,
+    max_tokens: u32 = 4096,
     tools: ?[]const ToolSpec = null,
     /// Max seconds to wait for the HTTP response (curl --max-time). 0 = no limit.
     timeout_secs: u64 = 0,
-    /// Reasoning effort for reasoning models (o1, o3, gpt-5*). null = don't send.
-    reasoning_effort: ?[]const u8 = null,
 };
 
 /// A single tool result message in a conversation.
@@ -425,6 +381,712 @@ pub fn assertProviderInterface(comptime T: type) void {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Secret Scrubbing
+// ════════════════════════════════════════════════════════════════════════════
+
+const MAX_API_ERROR_CHARS: usize = 200;
+
+fn isSecretChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == ':';
+}
+
+fn tokenEnd(input: []const u8, from: usize) usize {
+    var end = from;
+    for (input[from..]) |c| {
+        if (isSecretChar(c)) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    return end;
+}
+
+/// Scrub known secret-like token prefixes from text.
+/// Redacts tokens with prefixes like `sk-`, `xoxb-`, `ghp_`, etc.
+pub fn scrubSecretPatterns(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const prefixes = [_][]const u8{
+        "sk-",  "xoxb-", "xoxp-", "ghp_",
+        "gho_", "ghs_",  "ghu_",  "glpat-",
+        "AKIA", "pypi-", "npm_",  "shpat_",
+    };
+    const redacted = "[REDACTED]";
+
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        // 1. Check key-value patterns: api_key=VALUE, token=VALUE, etc.
+        if (matchKeyValueSecret(input, i)) |kv| {
+            // Keep key + separator, redact the value (show first 4 chars)
+            try result.appendSlice(allocator, input[i..kv.value_start]);
+            const val = input[kv.value_start..kv.value_end];
+            if (val.len > 4) {
+                try result.appendSlice(allocator, val[0..4]);
+            }
+            try result.appendSlice(allocator, redacted);
+            i = kv.value_end;
+            continue;
+        }
+
+        // 2. Check "bearer TOKEN" (case-insensitive)
+        if (matchBearerToken(input, i)) |bt| {
+            try result.appendSlice(allocator, input[i .. i + bt.prefix_len]);
+            const val = input[i + bt.prefix_len .. bt.end];
+            if (val.len > 4) {
+                try result.appendSlice(allocator, val[0..4]);
+            }
+            try result.appendSlice(allocator, redacted);
+            i = bt.end;
+            continue;
+        }
+
+        // 3. Check prefix-based tokens
+        var matched = false;
+        for (prefixes) |prefix| {
+            if (i + prefix.len <= input.len and std.mem.eql(u8, input[i..][0..prefix.len], prefix)) {
+                const content_start = i + prefix.len;
+                const end = tokenEnd(input, content_start);
+                if (end > content_start) {
+                    try result.appendSlice(allocator, redacted);
+                    i = end;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            try result.append(allocator, input[i]);
+            i += 1;
+        }
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
+const KeyValueMatch = struct { value_start: usize, value_end: usize };
+
+/// Match patterns like `api_key=VALUE`, `token=VALUE`, `password: VALUE`, `secret=VALUE`.
+fn matchKeyValueSecret(input: []const u8, pos: usize) ?KeyValueMatch {
+    const keywords = [_][]const u8{
+        "api_key", "api-key",    "apikey",
+        "token",   "password",   "passwd",
+        "secret",  "api_secret", "access_key",
+    };
+    for (keywords) |kw| {
+        if (pos + kw.len >= input.len) continue;
+        if (!eqlLowercase(input[pos..][0..kw.len], kw)) continue;
+        // Check separator after keyword: `=`, `:`, `= `, `: `
+        var sep_end = pos + kw.len;
+        if (sep_end < input.len and (input[sep_end] == '=' or input[sep_end] == ':')) {
+            sep_end += 1;
+            // Skip optional space after separator
+            while (sep_end < input.len and input[sep_end] == ' ') sep_end += 1;
+            // Skip optional quotes
+            var quote: u8 = 0;
+            if (sep_end < input.len and (input[sep_end] == '"' or input[sep_end] == '\'')) {
+                quote = input[sep_end];
+                sep_end += 1;
+            }
+            const value_start = sep_end;
+            var value_end = value_start;
+            if (quote != 0) {
+                // Read until closing quote
+                while (value_end < input.len and input[value_end] != quote) value_end += 1;
+                if (value_end < input.len) value_end += 1; // skip closing quote
+            } else {
+                value_end = tokenEnd(input, value_start);
+            }
+            if (value_end > value_start) {
+                return .{ .value_start = value_start, .value_end = value_end };
+            }
+        }
+    }
+    return null;
+}
+
+const BearerMatch = struct { prefix_len: usize, end: usize };
+
+/// Match "Bearer TOKEN" or "bearer TOKEN" pattern.
+fn matchBearerToken(input: []const u8, pos: usize) ?BearerMatch {
+    const bearer_variants = [_][]const u8{ "Bearer ", "bearer ", "BEARER " };
+    for (bearer_variants) |prefix| {
+        if (pos + prefix.len <= input.len and std.mem.eql(u8, input[pos..][0..prefix.len], prefix)) {
+            const token_start = pos + prefix.len;
+            const end = tokenEnd(input, token_start);
+            if (end > token_start) {
+                return .{ .prefix_len = prefix.len, .end = end };
+            }
+        }
+    }
+    return null;
+}
+
+/// Case-insensitive comparison (input can be mixed case, kw is lowercase).
+fn eqlLowercase(input: []const u8, kw: []const u8) bool {
+    if (input.len != kw.len) return false;
+    for (input, kw) |a, b| {
+        if (std.ascii.toLower(a) != b) return false;
+    }
+    return true;
+}
+
+/// Maximum tool output length before truncation.
+const MAX_TOOL_OUTPUT_CHARS: usize = 10_000;
+
+/// Scrub credentials from tool execution output and truncate if too long.
+/// Returns an owned slice. Caller must free.
+pub fn scrubToolOutput(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    // First truncate if too long
+    const truncated = if (input.len > MAX_TOOL_OUTPUT_CHARS) blk: {
+        const suffix = "\n[output truncated]";
+        var buf = try allocator.alloc(u8, MAX_TOOL_OUTPUT_CHARS + suffix.len);
+        @memcpy(buf[0..MAX_TOOL_OUTPUT_CHARS], input[0..MAX_TOOL_OUTPUT_CHARS]);
+        @memcpy(buf[MAX_TOOL_OUTPUT_CHARS..], suffix);
+        break :blk buf;
+    } else try allocator.dupe(u8, input);
+    defer allocator.free(truncated);
+
+    // Then scrub secrets
+    return scrubSecretPatterns(allocator, truncated);
+}
+
+/// Sanitize API error text by scrubbing secrets and truncating length.
+pub fn sanitizeApiError(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const scrubbed = try scrubSecretPatterns(allocator, input);
+
+    if (scrubbed.len <= MAX_API_ERROR_CHARS) {
+        return scrubbed;
+    }
+
+    // Truncate
+    var truncated = try allocator.alloc(u8, MAX_API_ERROR_CHARS + 3);
+    @memcpy(truncated[0..MAX_API_ERROR_CHARS], scrubbed[0..MAX_API_ERROR_CHARS]);
+    @memcpy(truncated[MAX_API_ERROR_CHARS..][0..3], "...");
+    allocator.free(scrubbed);
+    return truncated;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// API Key Resolution
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Resolve API key for a provider from config and environment variables.
+///
+/// Resolution order:
+/// 1. Explicitly provided `api_key` parameter (trimmed, filtered if empty)
+/// 2. Provider-specific environment variable
+/// 3. Generic fallback variables (`NULLCLAW_API_KEY`, `API_KEY`)
+pub fn resolveApiKey(
+    allocator: std.mem.Allocator,
+    provider_name: []const u8,
+    api_key: ?[]const u8,
+) !?[]u8 {
+    // 1. Explicit key
+    if (api_key) |key| {
+        const trimmed = std.mem.trim(u8, key, " \t\r\n");
+        if (trimmed.len > 0) {
+            return try allocator.dupe(u8, trimmed);
+        }
+    }
+
+    // 2. Provider-specific env vars
+    const env_candidates = providerEnvCandidates(provider_name);
+    for (env_candidates) |env_var| {
+        if (env_var.len == 0) break;
+        if (std.process.getEnvVarOwned(allocator, env_var)) |value| {
+            const trimmed = std.mem.trim(u8, value, " \t\r\n");
+            if (trimmed.len > 0) {
+                if (trimmed.ptr != value.ptr or trimmed.len != value.len) {
+                    const duped = try allocator.dupe(u8, trimmed);
+                    allocator.free(value);
+                    return duped;
+                }
+                return value;
+            }
+            allocator.free(value);
+        } else |_| {}
+    }
+
+    // 3. Generic fallbacks
+    const fallbacks = [_][]const u8{ "NULLCLAW_API_KEY", "API_KEY" };
+    for (fallbacks) |env_var| {
+        if (std.process.getEnvVarOwned(allocator, env_var)) |value| {
+            const trimmed = std.mem.trim(u8, value, " \t\r\n");
+            if (trimmed.len > 0) {
+                if (trimmed.ptr != value.ptr or trimmed.len != value.len) {
+                    const duped = try allocator.dupe(u8, trimmed);
+                    allocator.free(value);
+                    return duped;
+                }
+                return value;
+            }
+            allocator.free(value);
+        } else |_| {}
+    }
+
+    return null;
+}
+
+fn providerEnvCandidates(name: []const u8) [3][]const u8 {
+    if (std.mem.eql(u8, name, "anthropic")) return .{ "ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "" };
+    if (std.mem.eql(u8, name, "openrouter")) return .{ "OPENROUTER_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "openai")) return .{ "OPENAI_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "gemini") or std.mem.eql(u8, name, "google") or std.mem.eql(u8, name, "google-gemini")) return .{ "GEMINI_API_KEY", "GOOGLE_API_KEY", "" };
+    if (std.mem.eql(u8, name, "groq")) return .{ "GROQ_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "mistral")) return .{ "MISTRAL_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "deepseek")) return .{ "DEEPSEEK_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "xai") or std.mem.eql(u8, name, "grok")) return .{ "XAI_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "together") or std.mem.eql(u8, name, "together-ai")) return .{ "TOGETHER_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "fireworks") or std.mem.eql(u8, name, "fireworks-ai")) return .{ "FIREWORKS_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "perplexity")) return .{ "PERPLEXITY_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "cohere")) return .{ "COHERE_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "venice")) return .{ "VENICE_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "moonshot") or std.mem.eql(u8, name, "kimi")) return .{ "MOONSHOT_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "nvidia") or std.mem.eql(u8, name, "nvidia-nim") or std.mem.eql(u8, name, "build.nvidia.com")) return .{ "NVIDIA_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "astrai")) return .{ "ASTRAI_API_KEY", "", "" };
+    if (std.mem.eql(u8, name, "lmstudio") or std.mem.eql(u8, name, "lm-studio")) return .{ "", "", "" };
+    return .{ "", "", "" };
+}
+
+/// Resolve API key with config providers as first priority:
+///   1. providers[].api_key from config
+///   2. Provider-specific env var (GROQ_API_KEY, etc.)
+///   3. Generic fallbacks (NULLCLAW_API_KEY, API_KEY)
+pub fn resolveApiKeyFromConfig(
+    allocator: std.mem.Allocator,
+    provider_name: []const u8,
+    providers: []const config_mod.ProviderEntry,
+) !?[]u8 {
+    for (providers) |e| {
+        if (std.mem.eql(u8, e.name, provider_name)) {
+            if (e.api_key) |k| return try allocator.dupe(u8, k);
+        }
+    }
+    return resolveApiKey(allocator, provider_name, null);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Provider Factory
+// ════════════════════════════════════════════════════════════════════════════
+
+pub const ProviderKind = enum {
+    anthropic_provider,
+    openai_provider,
+    openrouter_provider,
+    ollama_provider,
+    gemini_provider,
+    compatible_provider,
+    claude_cli_provider,
+    codex_cli_provider,
+    unknown,
+};
+
+/// Determine which provider to create from a name string.
+pub fn classifyProvider(name: []const u8) ProviderKind {
+    const provider_map = std.StaticStringMap(ProviderKind).initComptime(.{
+        .{ "anthropic", .anthropic_provider },
+        .{ "openai", .openai_provider },
+        .{ "openrouter", .openrouter_provider },
+        .{ "ollama", .ollama_provider },
+        .{ "gemini", .gemini_provider },
+        .{ "google", .gemini_provider },
+        .{ "google-gemini", .gemini_provider },
+        .{ "claude-cli", .claude_cli_provider },
+        .{ "codex-cli", .codex_cli_provider },
+        // OpenAI-compatible providers
+        .{ "venice", .compatible_provider },
+        .{ "vercel", .compatible_provider },
+        .{ "vercel-ai", .compatible_provider },
+        .{ "cloudflare", .compatible_provider },
+        .{ "cloudflare-ai", .compatible_provider },
+        .{ "moonshot", .compatible_provider },
+        .{ "kimi", .compatible_provider },
+        .{ "synthetic", .compatible_provider },
+        .{ "opencode", .compatible_provider },
+        .{ "opencode-zen", .compatible_provider },
+        .{ "zai", .compatible_provider },
+        .{ "z.ai", .compatible_provider },
+        .{ "glm", .compatible_provider },
+        .{ "zhipu", .compatible_provider },
+        .{ "minimax", .compatible_provider },
+        .{ "bedrock", .compatible_provider },
+        .{ "aws-bedrock", .compatible_provider },
+        .{ "qianfan", .compatible_provider },
+        .{ "baidu", .compatible_provider },
+        .{ "qwen", .compatible_provider },
+        .{ "dashscope", .compatible_provider },
+        .{ "qwen-intl", .compatible_provider },
+        .{ "dashscope-intl", .compatible_provider },
+        .{ "qwen-us", .compatible_provider },
+        .{ "dashscope-us", .compatible_provider },
+        .{ "groq", .compatible_provider },
+        .{ "mistral", .compatible_provider },
+        .{ "xai", .compatible_provider },
+        .{ "grok", .compatible_provider },
+        .{ "deepseek", .compatible_provider },
+        .{ "together", .compatible_provider },
+        .{ "together-ai", .compatible_provider },
+        .{ "fireworks", .compatible_provider },
+        .{ "fireworks-ai", .compatible_provider },
+        .{ "perplexity", .compatible_provider },
+        .{ "cohere", .compatible_provider },
+        .{ "copilot", .compatible_provider },
+        .{ "github-copilot", .compatible_provider },
+        .{ "lmstudio", .compatible_provider },
+        .{ "lm-studio", .compatible_provider },
+        .{ "nvidia", .compatible_provider },
+        .{ "nvidia-nim", .compatible_provider },
+        .{ "build.nvidia.com", .compatible_provider },
+        .{ "astrai", .compatible_provider },
+    });
+
+    if (provider_map.get(name)) |kind| return kind;
+
+    // custom: prefix
+    if (std.mem.startsWith(u8, name, "custom:")) return .compatible_provider;
+
+    // anthropic-custom: prefix
+    if (std.mem.startsWith(u8, name, "anthropic-custom:")) return .anthropic_provider;
+
+    return .unknown;
+}
+
+/// Auto-detect provider kind from an API key prefix.
+pub fn detectProviderByApiKey(key: []const u8) ProviderKind {
+    if (key.len < 3) return .unknown;
+    if (std.mem.startsWith(u8, key, "sk-or-")) return .openrouter_provider;
+    if (std.mem.startsWith(u8, key, "sk-ant-")) return .anthropic_provider;
+    if (std.mem.startsWith(u8, key, "sk-")) return .openai_provider;
+    if (std.mem.startsWith(u8, key, "gsk_")) return .compatible_provider;
+    if (std.mem.startsWith(u8, key, "xai-")) return .compatible_provider;
+    if (std.mem.startsWith(u8, key, "pplx-")) return .compatible_provider;
+    if (std.mem.startsWith(u8, key, "AKIA")) return .compatible_provider;
+    if (std.mem.startsWith(u8, key, "AIza")) return .gemini_provider;
+    return .unknown;
+}
+
+/// Get the base URL for an OpenAI-compatible provider by name.
+pub fn compatibleProviderUrl(name: []const u8) ?[]const u8 {
+    const map = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "venice", "https://api.venice.ai" },
+        .{ "vercel", "https://api.vercel.ai" },
+        .{ "vercel-ai", "https://api.vercel.ai" },
+        .{ "cloudflare", "https://gateway.ai.cloudflare.com/v1" },
+        .{ "cloudflare-ai", "https://gateway.ai.cloudflare.com/v1" },
+        .{ "moonshot", "https://api.moonshot.cn" },
+        .{ "kimi", "https://api.moonshot.cn" },
+        .{ "synthetic", "https://api.synthetic.com" },
+        .{ "opencode", "https://api.opencode.ai" },
+        .{ "opencode-zen", "https://api.opencode.ai" },
+        .{ "zai", "https://api.z.ai/api/coding/paas/v4" },
+        .{ "z.ai", "https://api.z.ai/api/coding/paas/v4" },
+        .{ "glm", "https://api.z.ai/api/paas/v4" },
+        .{ "zhipu", "https://api.z.ai/api/paas/v4" },
+        .{ "minimax", "https://api.minimaxi.com/v1" },
+        .{ "bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com" },
+        .{ "aws-bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com" },
+        .{ "qianfan", "https://aip.baidubce.com" },
+        .{ "baidu", "https://aip.baidubce.com" },
+        .{ "qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+        .{ "dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+        .{ "qwen-intl", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" },
+        .{ "dashscope-intl", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" },
+        .{ "qwen-us", "https://dashscope-us.aliyuncs.com/compatible-mode/v1" },
+        .{ "dashscope-us", "https://dashscope-us.aliyuncs.com/compatible-mode/v1" },
+        .{ "groq", "https://api.groq.com/openai" },
+        .{ "mistral", "https://api.mistral.ai" },
+        .{ "xai", "https://api.x.ai" },
+        .{ "grok", "https://api.x.ai" },
+        .{ "deepseek", "https://api.deepseek.com" },
+        .{ "together", "https://api.together.xyz" },
+        .{ "together-ai", "https://api.together.xyz" },
+        .{ "fireworks", "https://api.fireworks.ai/inference/v1" },
+        .{ "fireworks-ai", "https://api.fireworks.ai/inference/v1" },
+        .{ "perplexity", "https://api.perplexity.ai" },
+        .{ "cohere", "https://api.cohere.com/compatibility" },
+        .{ "copilot", "https://api.githubcopilot.com" },
+        .{ "github-copilot", "https://api.githubcopilot.com" },
+        .{ "lmstudio", "http://localhost:1234/v1" },
+        .{ "lm-studio", "http://localhost:1234/v1" },
+        .{ "nvidia", "https://integrate.api.nvidia.com/v1" },
+        .{ "nvidia-nim", "https://integrate.api.nvidia.com/v1" },
+        .{ "build.nvidia.com", "https://integrate.api.nvidia.com/v1" },
+        .{ "astrai", "https://as-trai.com/v1" },
+    });
+    return map.get(name);
+}
+
+/// Get the display name for an OpenAI-compatible provider.
+pub fn compatibleProviderDisplayName(name: []const u8) []const u8 {
+    const map = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "venice", "Venice" },
+        .{ "vercel", "Vercel AI Gateway" },
+        .{ "vercel-ai", "Vercel AI Gateway" },
+        .{ "cloudflare", "Cloudflare AI Gateway" },
+        .{ "cloudflare-ai", "Cloudflare AI Gateway" },
+        .{ "moonshot", "Moonshot" },
+        .{ "kimi", "Moonshot" },
+        .{ "synthetic", "Synthetic" },
+        .{ "opencode", "OpenCode Zen" },
+        .{ "opencode-zen", "OpenCode Zen" },
+        .{ "zai", "Z.AI" },
+        .{ "z.ai", "Z.AI" },
+        .{ "glm", "GLM" },
+        .{ "zhipu", "GLM" },
+        .{ "minimax", "MiniMax" },
+        .{ "bedrock", "Amazon Bedrock" },
+        .{ "aws-bedrock", "Amazon Bedrock" },
+        .{ "qianfan", "Qianfan" },
+        .{ "baidu", "Qianfan" },
+        .{ "qwen", "Qwen" },
+        .{ "dashscope", "Qwen" },
+        .{ "qwen-intl", "Qwen" },
+        .{ "dashscope-intl", "Qwen" },
+        .{ "qwen-us", "Qwen" },
+        .{ "dashscope-us", "Qwen" },
+        .{ "groq", "Groq" },
+        .{ "mistral", "Mistral" },
+        .{ "xai", "xAI" },
+        .{ "grok", "xAI" },
+        .{ "deepseek", "DeepSeek" },
+        .{ "together", "Together AI" },
+        .{ "together-ai", "Together AI" },
+        .{ "fireworks", "Fireworks AI" },
+        .{ "fireworks-ai", "Fireworks AI" },
+        .{ "perplexity", "Perplexity" },
+        .{ "cohere", "Cohere" },
+        .{ "copilot", "GitHub Copilot" },
+        .{ "github-copilot", "GitHub Copilot" },
+        .{ "lmstudio", "LM Studio" },
+        .{ "lm-studio", "LM Studio" },
+        .{ "nvidia", "NVIDIA NIM" },
+        .{ "nvidia-nim", "NVIDIA NIM" },
+        .{ "build.nvidia.com", "NVIDIA NIM" },
+        .{ "astrai", "Astrai" },
+    });
+    return map.get(name) orelse "Custom";
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// High-level complete function (legacy compatibility)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// High-level complete function that routes to the right provider via HTTP.
+/// Used by agent.zig for backward compatibility.
+/// Extract api_key from a config-like struct (supports both Config.defaultProviderKey() and plain .api_key field).
+fn resolveApiKeyFromCfg(cfg: anytype) ?[]const u8 {
+    const T = @TypeOf(cfg);
+    const Struct = switch (@typeInfo(T)) {
+        .pointer => |p| p.child,
+        else => T,
+    };
+    if (@hasField(Struct, "api_key")) return cfg.api_key;
+    if (@hasDecl(Struct, "defaultProviderKey")) return cfg.defaultProviderKey();
+    return null;
+}
+
+pub fn complete(allocator: std.mem.Allocator, cfg: anytype, prompt: []const u8) ![]const u8 {
+    const api_key = resolveApiKeyFromCfg(cfg) orelse return error.NoApiKey;
+    const url = providerUrl(cfg.default_provider);
+    const model = cfg.default_model orelse "anthropic/claude-sonnet-4-5-20250929";
+    const body_str = try buildRequestBody(allocator, model, prompt, cfg.temperature, cfg.max_tokens);
+    defer allocator.free(body_str);
+
+    const auth_val = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
+    defer allocator.free(auth_val);
+
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer allocator.free(aw.writer.buffer);
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = body_str,
+        .extra_headers = &.{
+            .{ .name = "Authorization", .value = auth_val },
+            .{ .name = "Content-Type", .value = "application/json" },
+        },
+        .response_writer = &aw.writer,
+    });
+
+    if (result.status != .ok) return error.ProviderError;
+
+    const response_body = aw.writer.buffer[0..aw.writer.end];
+    return try extractContent(allocator, response_body);
+}
+
+/// Like complete() but prepends a system prompt. OpenAI-compatible format.
+pub fn completeWithSystem(allocator: std.mem.Allocator, cfg: anytype, system_prompt: []const u8, prompt: []const u8) ![]const u8 {
+    const api_key = resolveApiKeyFromCfg(cfg) orelse return error.NoApiKey;
+    const url = providerUrl(cfg.default_provider);
+    const model = cfg.default_model orelse "anthropic/claude-sonnet-4-5-20250929";
+    const max_tok: u32 = if (cfg.max_tokens) |mt| @intCast(@min(mt, std.math.maxInt(u32))) else 4096;
+    const body_str = try buildRequestBodyWithSystem(allocator, model, system_prompt, prompt, cfg.temperature, max_tok);
+    defer allocator.free(body_str);
+
+    const auth_val = try std.fmt.allocPrint(allocator, "Bearer {s}", .{api_key});
+    defer allocator.free(auth_val);
+
+    var client: std.http.Client = .{ .allocator = allocator };
+    defer client.deinit();
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer allocator.free(aw.writer.buffer);
+
+    const result = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = body_str,
+        .extra_headers = &.{
+            .{ .name = "Authorization", .value = auth_val },
+            .{ .name = "Content-Type", .value = "application/json" },
+        },
+        .response_writer = &aw.writer,
+    });
+
+    if (result.status != .ok) return error.ProviderError;
+
+    const response_body = aw.writer.buffer[0..aw.writer.end];
+    return try extractContent(allocator, response_body);
+}
+
+/// Provider URL mapping for the legacy complete() function.
+pub fn providerUrl(provider_name: []const u8) []const u8 {
+    const map = std.StaticStringMap([]const u8).initComptime(.{
+        .{ "anthropic", "https://api.anthropic.com/v1/messages" },
+        .{ "openai", "https://api.openai.com/v1/chat/completions" },
+        .{ "ollama", "http://localhost:11434/api/chat" },
+        .{ "gemini", "https://generativelanguage.googleapis.com/v1beta" },
+        .{ "google", "https://generativelanguage.googleapis.com/v1beta" },
+    });
+    return map.get(provider_name) orelse "https://openrouter.ai/api/v1/chat/completions";
+}
+
+/// Build a JSON request body for the legacy complete() function.
+pub fn buildRequestBody(allocator: std.mem.Allocator, model: []const u8, prompt: []const u8, temperature: f64, max_tokens: u32) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"model\":");
+    try json_util.appendJsonString(&buf, allocator, model);
+    try w.writeAll(",\"messages\":[{\"role\":\"user\",\"content\":");
+    try json_util.appendJsonString(&buf, allocator, prompt);
+    try std.fmt.format(w, "}}],\"temperature\":{d:.1},\"max_tokens\":{d}}}", .{ temperature, max_tokens });
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Build a JSON request body with a system prompt (OpenAI-compatible format).
+pub fn buildRequestBodyWithSystem(allocator: std.mem.Allocator, model: []const u8, system: []const u8, prompt: []const u8, temperature: f64, max_tokens: u32) ![]const u8 {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try w.writeAll("{\"model\":\"");
+    try w.writeAll(model);
+    try w.writeAll("\",\"messages\":[{\"role\":\"system\",\"content\":");
+    try json_util.appendJsonString(&buf, allocator, system);
+    try w.writeAll("},{\"role\":\"user\",\"content\":");
+    try json_util.appendJsonString(&buf, allocator, prompt);
+    try std.fmt.format(w, "}}],\"temperature\":{d:.1},\"max_tokens\":{d}}}", .{ temperature, max_tokens });
+    return try buf.toOwnedSlice(allocator);
+}
+
+/// Re-export shared JSON string utility (used by sub-modules via `root.appendJsonString`).
+pub const appendJsonString = json_util.appendJsonString;
+
+/// Serialize tool definitions into an OpenAI-format JSON array, appending directly into `buf`.
+/// Format: [{"type":"function","function":{"name":"...","description":"...","parameters":{...}}}]
+pub fn convertToolsOpenAI(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, tools: []const ToolSpec) !void {
+    if (tools.len == 0) {
+        try buf.appendSlice(allocator, "[]");
+        return;
+    }
+    try buf.append(allocator, '[');
+    for (tools, 0..) |tool, i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"type\":\"function\",\"function\":{\"name\":");
+        try json_util.appendJsonString(buf, allocator, tool.name);
+        try buf.appendSlice(allocator, ",\"description\":");
+        try json_util.appendJsonString(buf, allocator, tool.description);
+        try buf.appendSlice(allocator, ",\"parameters\":");
+        try buf.appendSlice(allocator, tool.parameters_json);
+        try buf.appendSlice(allocator, "}}");
+    }
+    try buf.append(allocator, ']');
+}
+
+/// Serialize tool definitions into an Anthropic-format JSON array, appending directly into `buf`.
+/// Format: [{"name":"...","description":"...","input_schema":{...}}]
+pub fn convertToolsAnthropic(buf: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, tools: []const ToolSpec) !void {
+    if (tools.len == 0) {
+        try buf.appendSlice(allocator, "[]");
+        return;
+    }
+    try buf.append(allocator, '[');
+    for (tools, 0..) |tool, i| {
+        if (i > 0) try buf.append(allocator, ',');
+        try buf.appendSlice(allocator, "{\"name\":");
+        try json_util.appendJsonString(buf, allocator, tool.name);
+        try buf.appendSlice(allocator, ",\"description\":");
+        try json_util.appendJsonString(buf, allocator, tool.description);
+        try buf.appendSlice(allocator, ",\"input_schema\":");
+        try buf.appendSlice(allocator, tool.parameters_json);
+        try buf.append(allocator, '}');
+    }
+    try buf.append(allocator, ']');
+}
+
+/// Re-export shared HTTP POST utility (used by sub-modules via `root.curlPost`).
+pub const curlPost = http_util.curlPost;
+
+/// Re-export proxy/timeout-aware HTTP POST (used by providers for LLM calls).
+pub const curlPostWithProxy = http_util.curlPostWithProxy;
+
+/// HTTP POST with optional LLM timeout (seconds). 0 = no limit.
+pub fn curlPostTimed(allocator: std.mem.Allocator, url: []const u8, body: []const u8, headers: []const []const u8, timeout_secs: u64) ![]u8 {
+    if (timeout_secs > 0) {
+        var timeout_buf: [16]u8 = undefined;
+        const timeout_str = std.fmt.bufPrint(&timeout_buf, "{d}", .{timeout_secs}) catch
+            return http_util.curlPost(allocator, url, body, headers);
+        return http_util.curlPostWithProxy(allocator, url, body, headers, null, timeout_str);
+    }
+    return http_util.curlPost(allocator, url, body, headers);
+}
+
+/// Extract text content from a provider JSON response.
+pub fn extractContent(allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    defer parsed.deinit();
+    const root_obj = parsed.value.object;
+
+    // OpenAI/OpenRouter format: choices[0].message.content
+    if (root_obj.get("choices")) |choices| {
+        if (choices.array.items.len > 0) {
+            if (choices.array.items[0].object.get("message")) |msg| {
+                if (msg.object.get("content")) |content| {
+                    if (content == .string) return try allocator.dupe(u8, content.string);
+                }
+            }
+        }
+    }
+
+    // Anthropic format: content[0].text
+    if (root_obj.get("content")) |content| {
+        if (content.array.items.len > 0) {
+            if (content.array.items[0].object.get("text")) |text| {
+                if (text == .string) return try allocator.dupe(u8, text.string);
+            }
+        }
+    }
+
+    return error.UnexpectedResponse;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Tests
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -471,6 +1133,186 @@ test "ChatResponse helpers" {
     };
     try std.testing.expect(with_tools.hasToolCalls());
     try std.testing.expectEqualStrings("Let me check", with_tools.contentOrEmpty());
+}
+
+test "convertToolsOpenAI produces valid JSON" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    const tools = &[_]ToolSpec{
+        .{
+            .name = "shell",
+            .description = "Run a \"shell\" command",
+            .parameters_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}}}",
+        },
+        .{
+            .name = "file_read",
+            .description = "Read a file",
+            .parameters_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}",
+        },
+    };
+    try convertToolsOpenAI(&buf, alloc, tools);
+    const json = buf.items;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const arr = parsed.value.array;
+    try std.testing.expectEqual(@as(usize, 2), arr.items.len);
+
+    const t0 = arr.items[0].object;
+    try std.testing.expectEqualStrings("function", t0.get("type").?.string);
+    const f0 = t0.get("function").?.object;
+    try std.testing.expectEqualStrings("shell", f0.get("name").?.string);
+    // Description with quotes should be properly escaped
+    try std.testing.expect(std.mem.indexOf(u8, f0.get("description").?.string, "\"shell\"") != null);
+    try std.testing.expect(f0.get("parameters").? == .object);
+
+    const f1 = arr.items[1].object.get("function").?.object;
+    try std.testing.expectEqualStrings("file_read", f1.get("name").?.string);
+}
+
+test "convertToolsOpenAI empty tools" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    try convertToolsOpenAI(&buf, alloc, &.{});
+    try std.testing.expectEqualStrings("[]", buf.items);
+}
+
+test "convertToolsAnthropic produces valid JSON" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    const tools = &[_]ToolSpec{
+        .{
+            .name = "shell",
+            .description = "Run a command",
+            .parameters_json = "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}}}",
+        },
+    };
+    try convertToolsAnthropic(&buf, alloc, tools);
+    const json = buf.items;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json, .{});
+    defer parsed.deinit();
+    const arr = parsed.value.array;
+    try std.testing.expectEqual(@as(usize, 1), arr.items.len);
+
+    const t0 = arr.items[0].object;
+    try std.testing.expectEqualStrings("shell", t0.get("name").?.string);
+    try std.testing.expectEqualStrings("Run a command", t0.get("description").?.string);
+    try std.testing.expect(t0.get("input_schema").? == .object);
+}
+
+test "convertToolsAnthropic empty tools" {
+    const alloc = std.testing.allocator;
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(alloc);
+    try convertToolsAnthropic(&buf, alloc, &.{});
+    try std.testing.expectEqualStrings("[]", buf.items);
+}
+
+test "providerUrl returns correct URLs" {
+    try std.testing.expectEqualStrings(
+        "https://api.anthropic.com/v1/messages",
+        providerUrl("anthropic"),
+    );
+    try std.testing.expectEqualStrings(
+        "https://api.openai.com/v1/chat/completions",
+        providerUrl("openai"),
+    );
+    try std.testing.expectEqualStrings(
+        "https://openrouter.ai/api/v1/chat/completions",
+        providerUrl("openrouter"),
+    );
+    try std.testing.expectEqualStrings(
+        "http://localhost:11434/api/chat",
+        providerUrl("ollama"),
+    );
+}
+
+test "classifyProvider identifies known providers" {
+    try std.testing.expect(classifyProvider("anthropic") == .anthropic_provider);
+    try std.testing.expect(classifyProvider("openai") == .openai_provider);
+    try std.testing.expect(classifyProvider("openrouter") == .openrouter_provider);
+    try std.testing.expect(classifyProvider("ollama") == .ollama_provider);
+    try std.testing.expect(classifyProvider("gemini") == .gemini_provider);
+    try std.testing.expect(classifyProvider("google") == .gemini_provider);
+    try std.testing.expect(classifyProvider("groq") == .compatible_provider);
+    try std.testing.expect(classifyProvider("mistral") == .compatible_provider);
+    try std.testing.expect(classifyProvider("deepseek") == .compatible_provider);
+    try std.testing.expect(classifyProvider("venice") == .compatible_provider);
+    try std.testing.expect(classifyProvider("custom:https://example.com") == .compatible_provider);
+    try std.testing.expect(classifyProvider("nonexistent") == .unknown);
+}
+
+test "compatibleProviderUrl returns correct URLs" {
+    try std.testing.expectEqualStrings("https://api.venice.ai", compatibleProviderUrl("venice").?);
+    try std.testing.expectEqualStrings("https://api.groq.com/openai", compatibleProviderUrl("groq").?);
+    try std.testing.expectEqualStrings("https://api.deepseek.com", compatibleProviderUrl("deepseek").?);
+    try std.testing.expect(compatibleProviderUrl("nonexistent") == null);
+}
+
+test "scrubSecretPatterns redacts sk- tokens" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "request failed: sk-1234567890abcdef");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-1234567890abcdef") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+}
+
+test "scrubSecretPatterns handles multiple prefixes" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "keys sk-abcdef xoxb-12345 xoxp-67890");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-abcdef") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "xoxb-12345") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "xoxp-67890") == null);
+}
+
+test "scrubSecretPatterns keeps bare prefix" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "only prefix sk- present");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-") != null);
+}
+
+test "sanitizeApiError truncates long errors" {
+    const allocator = std.testing.allocator;
+    const long = try allocator.alloc(u8, 400);
+    defer allocator.free(long);
+    @memset(long, 'a');
+    const result = try sanitizeApiError(allocator, long);
+    defer allocator.free(result);
+    try std.testing.expect(result.len <= MAX_API_ERROR_CHARS + 3);
+    try std.testing.expect(std.mem.endsWith(u8, result, "..."));
+}
+
+test "sanitizeApiError no secret no change" {
+    const allocator = std.testing.allocator;
+    const result = try sanitizeApiError(allocator, "simple upstream timeout");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("simple upstream timeout", result);
+}
+
+test "extractContent parses OpenAI format" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"choices":[{"message":{"content":"Hello there!"}}]}
+    ;
+    const result = try extractContent(allocator, body);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Hello there!", result);
+}
+
+test "extractContent parses Anthropic format" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"content":[{"type":"text","text":"Hello from Claude"}]}
+    ;
+    const result = try extractContent(allocator, body);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("Hello from Claude", result);
 }
 
 test "ConversationMessage union variants" {
@@ -582,6 +1424,191 @@ test "provider chatWithTools falls back to chat when vtable is null" {
     try std.testing.expectEqualStrings("test-model", resp.model);
 }
 
+test "nvidia resolves to correct URL" {
+    try std.testing.expectEqualStrings("https://integrate.api.nvidia.com/v1", compatibleProviderUrl("nvidia").?);
+}
+
+test "lm-studio resolves to localhost:1234" {
+    try std.testing.expectEqualStrings("http://localhost:1234/v1", compatibleProviderUrl("lm-studio").?);
+}
+
+test "astrai resolves to astrai API URL" {
+    try std.testing.expectEqualStrings("https://as-trai.com/v1", compatibleProviderUrl("astrai").?);
+}
+
+test "anthropic-custom prefix classifies as anthropic provider" {
+    try std.testing.expect(classifyProvider("anthropic-custom:https://my-api.example.com") == .anthropic_provider);
+}
+
+test "NVIDIA_API_KEY env resolves nvidia credential" {
+    const allocator = std.testing.allocator;
+    // providerEnvCandidates returns NVIDIA_API_KEY for nvidia
+    const candidates = providerEnvCandidates("nvidia");
+    try std.testing.expectEqualStrings("NVIDIA_API_KEY", candidates[0]);
+    // Also check aliases
+    const candidates_nim = providerEnvCandidates("nvidia-nim");
+    try std.testing.expectEqualStrings("NVIDIA_API_KEY", candidates_nim[0]);
+    const candidates_build = providerEnvCandidates("build.nvidia.com");
+    try std.testing.expectEqualStrings("NVIDIA_API_KEY", candidates_build[0]);
+    _ = allocator;
+}
+
+test "new providers display names" {
+    try std.testing.expectEqualStrings("NVIDIA NIM", compatibleProviderDisplayName("nvidia"));
+    try std.testing.expectEqualStrings("NVIDIA NIM", compatibleProviderDisplayName("nvidia-nim"));
+    try std.testing.expectEqualStrings("NVIDIA NIM", compatibleProviderDisplayName("build.nvidia.com"));
+    try std.testing.expectEqualStrings("LM Studio", compatibleProviderDisplayName("lmstudio"));
+    try std.testing.expectEqualStrings("LM Studio", compatibleProviderDisplayName("lm-studio"));
+    try std.testing.expectEqualStrings("Astrai", compatibleProviderDisplayName("astrai"));
+}
+
+test "new providers classify as compatible" {
+    try std.testing.expect(classifyProvider("nvidia") == .compatible_provider);
+    try std.testing.expect(classifyProvider("nvidia-nim") == .compatible_provider);
+    try std.testing.expect(classifyProvider("build.nvidia.com") == .compatible_provider);
+    try std.testing.expect(classifyProvider("lmstudio") == .compatible_provider);
+    try std.testing.expect(classifyProvider("lm-studio") == .compatible_provider);
+    try std.testing.expect(classifyProvider("astrai") == .compatible_provider);
+}
+
+test "astrai env candidate is ASTRAI_API_KEY" {
+    const candidates = providerEnvCandidates("astrai");
+    try std.testing.expectEqualStrings("ASTRAI_API_KEY", candidates[0]);
+}
+
+// ── Credential Scrubbing Extended Tests ─────────────────────────
+
+test "scrubSecretPatterns redacts ghp_ GitHub tokens" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "token is ghp_ABCDef123456789012345678901234567890");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "ghp_") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+}
+
+test "scrubSecretPatterns redacts gho_ GitHub OAuth tokens" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "got gho_abcdef12345");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "gho_abcdef") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+}
+
+test "scrubSecretPatterns redacts glpat- GitLab tokens" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "gitlab glpat-ABCDEF123456");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "glpat-ABCDEF") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+}
+
+test "scrubSecretPatterns redacts AKIA AWS keys" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "aws AKIAIOSFODNN7EXAMPLE");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "AKIAIOSFODNN7EXAMPLE") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+}
+
+test "scrubSecretPatterns redacts api_key=VALUE pattern" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "config: api_key=sk_live_1234567890abcdef");
+    defer allocator.free(result);
+    // Should keep key name and first 4 chars of value
+    try std.testing.expect(std.mem.indexOf(u8, result, "api_key=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk_l") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    // Full value should not be present
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk_live_1234567890abcdef") == null);
+}
+
+test "scrubSecretPatterns redacts token: VALUE pattern" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "token: mySecretToken123");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "token: ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "mySecretToken123") == null);
+}
+
+test "scrubSecretPatterns redacts password=VALUE pattern" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "PASSWORD=hunter2 rest");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "hunter2") == null);
+}
+
+test "scrubSecretPatterns redacts Bearer TOKEN pattern" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "Bearer ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret") == null);
+}
+
+test "scrubSecretPatterns redacts secret= with quoted value" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "secret=\"my_very_secret_value\" next");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "my_very_secret_value") == null);
+}
+
+test "scrubSecretPatterns no false positives on normal text" {
+    const allocator = std.testing.allocator;
+    const result = try scrubSecretPatterns(allocator, "the password policy requires 8 chars. See token docs.");
+    defer allocator.free(result);
+    // "password" and "token" without separator should not trigger redaction
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") == null);
+}
+
+test "scrubToolOutput truncates long output" {
+    const allocator = std.testing.allocator;
+    const long = try allocator.alloc(u8, 15_000);
+    defer allocator.free(long);
+    @memset(long, 'x');
+    const result = try scrubToolOutput(allocator, long);
+    defer allocator.free(result);
+    try std.testing.expect(result.len < 15_000);
+    try std.testing.expect(std.mem.endsWith(u8, result, "[output truncated]"));
+}
+
+test "scrubToolOutput scrubs secrets and truncates" {
+    const allocator = std.testing.allocator;
+    const result = try scrubToolOutput(allocator, "cat .env output: api_key=sk_live_abcdef123456");
+    defer allocator.free(result);
+    try std.testing.expect(std.mem.indexOf(u8, result, "[REDACTED]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk_live_abcdef123456") == null);
+}
+
+test "scrubToolOutput passes through clean short output" {
+    const allocator = std.testing.allocator;
+    const result = try scrubToolOutput(allocator, "ls output: file1.txt file2.txt");
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("ls output: file1.txt file2.txt", result);
+}
+
+test "scrubSecretPatterns handles multiple patterns in one string" {
+    const allocator = std.testing.allocator;
+    const input = "keys: api_key=abc123 token=xyz789 ghp_TokenHere sk-mykey123";
+    const result = try scrubSecretPatterns(allocator, input);
+    defer allocator.free(result);
+    // All secrets should be redacted
+    try std.testing.expect(std.mem.indexOf(u8, result, "abc123") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "xyz789") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "ghp_TokenHere") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sk-mykey123") == null);
+}
+
+test "eqlLowercase matches case-insensitively" {
+    try std.testing.expect(eqlLowercase("API_KEY", "api_key"));
+    try std.testing.expect(eqlLowercase("api_key", "api_key"));
+    try std.testing.expect(eqlLowercase("Api_Key", "api_key"));
+    try std.testing.expect(!eqlLowercase("api_keys", "api_key")); // different length — won't match
+}
+
 test "ChatResponse reasoning_content defaults to null" {
     const resp = ChatResponse{};
     try std.testing.expect(resp.reasoning_content == null);
@@ -590,6 +1617,46 @@ test "ChatResponse reasoning_content defaults to null" {
 test "ChatResponse reasoning_content can be set" {
     const resp = ChatResponse{ .reasoning_content = "Let me think..." };
     try std.testing.expectEqualStrings("Let me think...", resp.reasoning_content.?);
+}
+
+test "detectProviderByApiKey openrouter" {
+    try std.testing.expect(detectProviderByApiKey("sk-or-v1-abc123") == .openrouter_provider);
+}
+
+test "detectProviderByApiKey anthropic" {
+    try std.testing.expect(detectProviderByApiKey("sk-ant-api03-abc123") == .anthropic_provider);
+}
+
+test "detectProviderByApiKey openai" {
+    try std.testing.expect(detectProviderByApiKey("sk-proj-abc123") == .openai_provider);
+}
+
+test "detectProviderByApiKey groq" {
+    try std.testing.expect(detectProviderByApiKey("gsk_abc123def456") == .compatible_provider);
+}
+
+test "detectProviderByApiKey xai" {
+    try std.testing.expect(detectProviderByApiKey("xai-abc123") == .compatible_provider);
+}
+
+test "detectProviderByApiKey perplexity" {
+    try std.testing.expect(detectProviderByApiKey("pplx-abc123") == .compatible_provider);
+}
+
+test "detectProviderByApiKey aws" {
+    try std.testing.expect(detectProviderByApiKey("AKIAIOSFODNN7EXAMPLE") == .compatible_provider);
+}
+
+test "detectProviderByApiKey gemini" {
+    try std.testing.expect(detectProviderByApiKey("AIzaSyAbc123") == .gemini_provider);
+}
+
+test "detectProviderByApiKey unknown" {
+    try std.testing.expect(detectProviderByApiKey("random-key") == .unknown);
+}
+
+test "detectProviderByApiKey short key" {
+    try std.testing.expect(detectProviderByApiKey("ab") == .unknown);
 }
 
 test "StreamChatResult defaults" {
@@ -651,6 +1718,45 @@ test "Provider.streamChat fallback emits single chunk and final" {
     try std.testing.expectEqualStrings("hello from fallback", result.content.?);
 }
 
+test "buildRequestBody escapes double quotes in prompt" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, "gpt-4o", "say \"hello\"", 0.7, 100);
+    defer allocator.free(body);
+    // Raw quote would break JSON; escaped form must be present
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"hello\\\"") != null);
+    // Verify it's valid JSON
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "buildRequestBody escapes newlines in prompt" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, "gpt-4o", "line1\nline2", 0.7, 100);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "buildRequestBody escapes backslash in prompt" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBody(allocator, "gpt-4o", "path\\to\\file", 0.7, 100);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\\") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
+test "buildRequestBodyWithSystem escapes special chars in both fields" {
+    const allocator = std.testing.allocator;
+    const body = try buildRequestBodyWithSystem(allocator, "gpt-4o", "sys \"role\"", "user\nprompt", 0.7, 100);
+    defer allocator.free(body);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\\"role\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\\n") != null);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, body, .{});
+    parsed.deinit();
+}
+
 test "appendJsonString encodes control chars as \\uXXXX" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -659,6 +1765,8 @@ test "appendJsonString encodes control chars as \\uXXXX" {
     try json_util.appendJsonString(&buf, allocator, "\x07");
     try std.testing.expectEqualStrings("\"\\u0007\"", buf.items);
 }
+
+// ── Multimodal Content Part Tests ────────────────────────────────
 
 test "makeTextPart creates text content part" {
     const part = makeTextPart("Hello world");
@@ -705,6 +1813,26 @@ test "ChatMessage with content_parts set" {
     try std.testing.expect(msg.content_parts.?.len == 2);
     try std.testing.expect(msg.content_parts.?[0] == .text);
     try std.testing.expect(msg.content_parts.?[1] == .image_url);
+}
+
+test "resolveApiKeyFromConfig finds key from providers" {
+    const entries = [_]config_mod.ProviderEntry{
+        .{ .name = "openrouter", .api_key = "sk-or-test" },
+        .{ .name = "groq", .api_key = "gsk_test" },
+    };
+    const result = try resolveApiKeyFromConfig(std.testing.allocator, "groq", &entries);
+    defer if (result) |r| std.testing.allocator.free(r);
+    try std.testing.expectEqualStrings("gsk_test", result.?);
+}
+
+test "resolveApiKeyFromConfig returns null for missing provider" {
+    const entries = [_]config_mod.ProviderEntry{
+        .{ .name = "openrouter", .api_key = "sk-or-test" },
+    };
+    // Without env var set, should fall through to env-based resolution
+    // which may or may not find a key — we just test it doesn't crash
+    const result = try resolveApiKeyFromConfig(std.testing.allocator, "nonexistent", &entries);
+    if (result) |r| std.testing.allocator.free(r);
 }
 
 test {

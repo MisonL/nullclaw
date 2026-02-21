@@ -280,7 +280,8 @@ Config: `~/.nullclaw/config.json` (created by `onboard`)
   "autonomy": {
     "level": "supervised",
     "workspace_only": true,
-    "max_actions_per_hour": 20
+    "max_actions_per_hour": 20,
+    "max_cost_per_day_cents": 500
   },
 
   "runtime": {
@@ -381,14 +382,6 @@ src/
   skillforge.zig        Skill discovery (GitHub), evaluation, integration
   ...
 ```
-
-## Versioning
-
-nullclaw uses **CalVer** (`YYYY.M.D`) for releases — e.g. `v2026.2.20`.
-
-- **Tag format:** `vYYYY.M.D` (one release per day max; patch suffix `vYYYY.M.D.N` if needed)
-- **No stability guarantees yet** — the project is pre-1.0, config and CLI may change between releases
-- **`nullclaw --version`** prints the current version
 
 ## Contributing
 

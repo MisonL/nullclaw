@@ -8,7 +8,6 @@ pub const ObserverEvent = union(enum) {
     agent_end: struct { duration_ms: u64, tokens_used: ?u64 },
     tool_call_start: struct { tool: []const u8 },
     tool_call: struct { tool: []const u8, duration_ms: u64, success: bool },
-    tool_iterations_exhausted: struct { iterations: u32 },
     turn_complete: void,
     channel_message: struct { channel: []const u8, direction: []const u8 },
     heartbeat_tick: void,
@@ -104,7 +103,6 @@ pub const LogObserver = struct {
             .agent_end => |e| std.log.info("agent.end duration_ms={d}", .{e.duration_ms}),
             .tool_call_start => |e| std.log.info("tool.start tool={s}", .{e.tool}),
             .tool_call => |e| std.log.info("tool.call tool={s} duration_ms={d} success={}", .{ e.tool, e.duration_ms, e.success }),
-            .tool_iterations_exhausted => |e| std.log.info("tool.iterations_exhausted iterations={d}", .{e.iterations}),
             .turn_complete => std.log.info("turn.complete", .{}),
             .channel_message => |e| std.log.info("channel.message channel={s} direction={s}", .{ e.channel, e.direction }),
             .heartbeat_tick => std.log.info("heartbeat.tick", .{}),
@@ -274,7 +272,6 @@ pub const FileObserver = struct {
             .agent_end => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"agent_end\",\"duration_ms\":{d}}}", .{e.duration_ms}) catch return,
             .tool_call_start => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"tool_call_start\",\"tool\":\"{s}\"}}", .{e.tool}) catch return,
             .tool_call => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"tool_call\",\"tool\":\"{s}\",\"duration_ms\":{d},\"success\":{}}}", .{ e.tool, e.duration_ms, e.success }) catch return,
-            .tool_iterations_exhausted => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"tool_iterations_exhausted\",\"iterations\":{d}}}", .{e.iterations}) catch return,
             .turn_complete => std.fmt.bufPrint(&buf, "{{\"event\":\"turn_complete\"}}", .{}) catch return,
             .channel_message => |e| std.fmt.bufPrint(&buf, "{{\"event\":\"channel_message\",\"channel\":\"{s}\",\"direction\":\"{s}\"}}", .{ e.channel, e.direction }) catch return,
             .heartbeat_tick => std.fmt.bufPrint(&buf, "{{\"event\":\"heartbeat_tick\"}}", .{}) catch return,
@@ -305,7 +302,7 @@ pub const FileObserver = struct {
 };
 
 /// Factory: create observer from config backend string.
-fn createObserver(backend: []const u8) []const u8 {
+pub fn createObserver(backend: []const u8) []const u8 {
     if (std.mem.eql(u8, backend, "log")) return "log";
     if (std.mem.eql(u8, backend, "verbose")) return "verbose";
     if (std.mem.eql(u8, backend, "file")) return "file";
@@ -487,13 +484,6 @@ pub const OtelObserver = struct {
                     .{ .key = "tool", .value = e.tool },
                     .{ .key = "duration_ms", .value = dur_str },
                     .{ .key = "success", .value = if (e.success) "true" else "false" },
-                });
-            },
-            .tool_iterations_exhausted => |e| {
-                var iter_buf: [20]u8 = undefined;
-                const iter_str = std.fmt.bufPrint(&iter_buf, "{d}", .{e.iterations}) catch "0";
-                self.addSpan("tool.iterations_exhausted", now, now, &.{
-                    .{ .key = "iterations", .value = iter_str },
                 });
             },
             .turn_complete => {

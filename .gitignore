@@ -12,6 +12,3 @@ zig-cache/
 *.bak
 *.a
 reference/
-
-result
-.direnv/

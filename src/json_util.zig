@@ -97,8 +97,8 @@ test "appendJsonString escapes control chars" {
 test "appendJsonString preserves Unicode" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try appendJsonString(&buf, std.testing.allocator, "Héllo 🌍");
-    try std.testing.expectEqualStrings("\"Héllo 🌍\"", buf.items);
+    try appendJsonString(&buf, std.testing.allocator, "Привет 🌍");
+    try std.testing.expectEqualStrings("\"Привет 🌍\"", buf.items);
 }
 
 test "appendJsonKeyValue" {

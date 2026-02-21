@@ -13,13 +13,12 @@ pub const PushoverTool = struct {
     workspace_dir: []const u8,
     allocator: std.mem.Allocator,
 
-    pub const tool_name = "pushover";
-    pub const tool_description = "Send a push notification via Pushover. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.";
-    pub const tool_params =
-        \\{"type":"object","properties":{"message":{"type":"string","description":"The notification message"},"title":{"type":"string","description":"Optional title"},"priority":{"type":"integer","description":"Priority -2..2 (default 0)"},"sound":{"type":"string","description":"Optional sound name"}},"required":["message"]}
-    ;
-
-    const vtable = root.ToolVTable(@This());
+    const vtable = Tool.VTable{
+        .execute = &vtableExecute,
+        .name = &vtableName,
+        .description = &vtableDesc,
+        .parameters_json = &vtableParams,
+    };
 
     pub fn tool(self: *PushoverTool) Tool {
         return .{
@@ -28,7 +27,26 @@ pub const PushoverTool = struct {
         };
     }
 
-    pub fn execute(self: *PushoverTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+        const self: *PushoverTool = @ptrCast(@alignCast(ptr));
+        return self.execute(allocator, args);
+    }
+
+    fn vtableName(_: *anyopaque) []const u8 {
+        return "pushover";
+    }
+
+    fn vtableDesc(_: *anyopaque) []const u8 {
+        return "Send a push notification via Pushover. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.";
+    }
+
+    fn vtableParams(_: *anyopaque) []const u8 {
+        return 
+        \\{"type":"object","properties":{"message":{"type":"string","description":"The notification message"},"title":{"type":"string","description":"Optional title"},"priority":{"type":"integer","description":"Priority -2..2 (default 0)"},"sound":{"type":"string","description":"Optional sound name"}},"required":["message"]}
+        ;
+    }
+
+    fn execute(self: *PushoverTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const message = root.getString(args, "message") orelse
             return ToolResult.fail("Missing required 'message' parameter");
 

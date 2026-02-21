@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("platform.zig");
 pub const config_types = @import("config_types.zig");
 pub const config_parse = @import("config_parse.zig");
 
@@ -74,7 +73,6 @@ pub const Config = struct {
     default_provider: []const u8 = "openrouter",
     default_model: ?[]const u8 = "anthropic/claude-sonnet-4",
     default_temperature: f64 = 0.7,
-    reasoning_effort: ?[]const u8 = null,
 
     // Model routing and delegate agents
     model_routes: []const ModelRouteConfig = &.{},
@@ -108,7 +106,7 @@ pub const Config = struct {
     // Convenience aliases for backward-compat flat access used by other modules.
     // These are set during load() to mirror nested values.
     temperature: f64 = 0.7,
-    max_tokens: ?u32 = null,
+    max_tokens: u32 = 4096,
     memory_backend: []const u8 = "sqlite",
     memory_auto_save: bool = true,
     heartbeat_enabled: bool = false,
@@ -201,17 +199,6 @@ pub const Config = struct {
         cfg.syncFlatFields();
 
         return cfg;
-    }
-
-    /// Free all memory owned by this config (arena + heap pointer).
-    /// No-op for configs created without load() (e.g. in tests).
-    pub fn deinit(self: *Config) void {
-        if (self.arena) |arena| {
-            const backing = arena.child_allocator;
-            arena.deinit();
-            backing.destroy(arena);
-            self.arena = null;
-        }
     }
 
     /// Parse a JSON array of strings into an allocated slice.
@@ -366,8 +353,9 @@ pub const Config = struct {
         try w.print("  \"autonomy\": {{\n", .{});
         try w.print("    \"level\": \"{s}\",\n", .{@tagName(self.autonomy.level)});
         try w.print("    \"workspace_only\": {s},\n", .{if (self.autonomy.workspace_only) "true" else "false"});
+        try w.print("    \"max_actions_per_hour\": {d},\n", .{self.autonomy.max_actions_per_hour});
         if (self.autonomy.allowed_paths.len > 0) {
-            try w.print("    \"max_actions_per_hour\": {d},\n", .{self.autonomy.max_actions_per_hour});
+            try w.print("    \"max_cost_per_day_cents\": {d},\n", .{self.autonomy.max_cost_per_day_cents});
             try w.print("    \"allowed_paths\": [", .{});
             for (self.autonomy.allowed_paths, 0..) |p, i| {
                 if (i > 0) try w.print(", ", .{});
@@ -375,7 +363,7 @@ pub const Config = struct {
             }
             try w.print("]\n", .{});
         } else {
-            try w.print("    \"max_actions_per_hour\": {d}\n", .{self.autonomy.max_actions_per_hour});
+            try w.print("    \"max_cost_per_day_cents\": {d}\n", .{self.autonomy.max_cost_per_day_cents});
         }
         try w.print("  }},\n", .{});
 
@@ -440,6 +428,18 @@ pub const Config = struct {
 
         try w.print("}}\n", .{});
         try w.flush();
+    }
+
+    pub fn ensureDirs(self: *const Config) !void {
+        const dir = std.fs.path.dirname(self.config_path) orelse return;
+        std.fs.makeDirAbsolute(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        std.fs.makeDirAbsolute(self.workspace_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
     }
 
     // ── Validation ──────────────────────────────────────────────
@@ -860,10 +860,10 @@ test "json parse integer temperature coerced to float" {
     try std.testing.expectEqual(@as(f64, 1.0), cfg.default_temperature);
 }
 
-test "json parse autonomy allowed commands" {
+test "json parse autonomy allowed commands and forbidden paths" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"autonomy": {"allowed_commands": ["ls", "cat", "git status"]}}
+        \\{"autonomy": {"allowed_commands": ["ls", "cat", "git status"], "forbidden_paths": ["/etc/shadow", "/root/.ssh"]}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -871,8 +871,13 @@ test "json parse autonomy allowed commands" {
     try std.testing.expectEqualStrings("ls", cfg.autonomy.allowed_commands[0]);
     try std.testing.expectEqualStrings("cat", cfg.autonomy.allowed_commands[1]);
     try std.testing.expectEqualStrings("git status", cfg.autonomy.allowed_commands[2]);
+    try std.testing.expectEqual(@as(usize, 2), cfg.autonomy.forbidden_paths.len);
+    try std.testing.expectEqualStrings("/etc/shadow", cfg.autonomy.forbidden_paths[0]);
+    try std.testing.expectEqualStrings("/root/.ssh", cfg.autonomy.forbidden_paths[1]);
     for (cfg.autonomy.allowed_commands) |cmd| allocator.free(cmd);
     allocator.free(cfg.autonomy.allowed_commands);
+    for (cfg.autonomy.forbidden_paths) |p| allocator.free(p);
+    allocator.free(cfg.autonomy.forbidden_paths);
 }
 
 test "json parse autonomy allowed_paths" {
@@ -1028,7 +1033,7 @@ test "json parse all new fields together" {
         \\{
         \\  "model_routes": [{"hint": "fast", "provider": "groq", "model": "llama-3.3-70b"}],
         \\  "agents": {"list": [{"name": "helper", "provider": "anthropic", "model": "claude-haiku-3.5"}]},
-        \\  "autonomy": {"allowed_commands": ["ls"]},
+        \\  "autonomy": {"allowed_commands": ["ls"], "forbidden_paths": ["/root"]},
         \\  "gateway": {"paired_tokens": ["tok-1"]},
         \\  "browser": {"allowed_domains": ["example.com"]}
         \\}
@@ -1038,6 +1043,7 @@ test "json parse all new fields together" {
     try std.testing.expectEqual(@as(usize, 1), cfg.model_routes.len);
     try std.testing.expectEqual(@as(usize, 1), cfg.agents.len);
     try std.testing.expectEqual(@as(usize, 1), cfg.autonomy.allowed_commands.len);
+    try std.testing.expectEqual(@as(usize, 1), cfg.autonomy.forbidden_paths.len);
     try std.testing.expectEqual(@as(usize, 1), cfg.gateway.paired_tokens.len);
     try std.testing.expectEqual(@as(usize, 1), cfg.browser.allowed_domains.len);
     // Cleanup
@@ -1051,6 +1057,8 @@ test "json parse all new fields together" {
     allocator.free(cfg.agents);
     allocator.free(cfg.autonomy.allowed_commands[0]);
     allocator.free(cfg.autonomy.allowed_commands);
+    allocator.free(cfg.autonomy.forbidden_paths[0]);
+    allocator.free(cfg.autonomy.forbidden_paths);
     allocator.free(cfg.gateway.paired_tokens[0]);
     allocator.free(cfg.gateway.paired_tokens);
     allocator.free(cfg.browser.allowed_domains[0]);
@@ -1516,49 +1524,6 @@ test "parse imessage config" {
     try std.testing.expectEqual(@as(usize, 1), ic.allow_from.len);
     for (ic.allow_from) |u| allocator.free(u);
     allocator.free(ic.allow_from);
-}
-
-test "json parse reasoning_effort" {
-    const allocator = std.testing.allocator;
-    const json =
-        \\{"reasoning_effort": "high"}
-    ;
-    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
-    try cfg.parseJson(json);
-    try std.testing.expectEqualStrings("high", cfg.reasoning_effort.?);
-    allocator.free(cfg.reasoning_effort.?);
-}
-
-test "json parse invalid reasoning_effort ignored" {
-    const allocator = std.testing.allocator;
-    const json =
-        \\{"reasoning_effort": "invalid"}
-    ;
-    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
-    try cfg.parseJson(json);
-    try std.testing.expect(cfg.reasoning_effort == null);
-}
-
-test "json parse reasoning_effort medium" {
-    const allocator = std.testing.allocator;
-    const json =
-        \\{"reasoning_effort": "medium"}
-    ;
-    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
-    try cfg.parseJson(json);
-    try std.testing.expectEqualStrings("medium", cfg.reasoning_effort.?);
-    allocator.free(cfg.reasoning_effort.?);
-}
-
-test "json parse reasoning_effort low" {
-    const allocator = std.testing.allocator;
-    const json =
-        \\{"reasoning_effort": "low"}
-    ;
-    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
-    try cfg.parseJson(json);
-    try std.testing.expectEqualStrings("low", cfg.reasoning_effort.?);
-    allocator.free(cfg.reasoning_effort.?);
 }
 
 test "unknown openclaw fields silently ignored" {

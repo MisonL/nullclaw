@@ -9,7 +9,6 @@
 //!   - Sandbox, cron status, channel connectivity (nullclaw-specific)
 
 const std = @import("std");
-const platform = @import("platform.zig");
 const Config = @import("config.zig").Config;
 const daemon = @import("daemon.zig");
 const cron = @import("cron.zig");
@@ -689,9 +688,7 @@ pub fn checkConfig(allocator: std.mem.Allocator) DiagResult {
         return .{ .name = "config", .ok = true, .message = "Config loaded" };
     } else |_| {
         return .{ .name = "config", .ok = false, .message = "No config found" };
-    };
-    cfg.deinit();
-    return .{ .name = "config", .ok = true, .message = "Config loaded" };
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────

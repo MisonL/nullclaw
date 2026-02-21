@@ -10,13 +10,12 @@ const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// CronRun tool — force-runs a cron job immediately by its ID, regardless of schedule.
 pub const CronRunTool = struct {
-    pub const tool_name = "cron_run";
-    pub const tool_description = "Force-run a cron job immediately by its ID, regardless of schedule.";
-    pub const tool_params =
-        \\{"type":"object","properties":{"job_id":{"type":"string","description":"The ID of the cron job to run"}},"required":["job_id"]}
-    ;
-
-    const vtable = root.ToolVTable(@This());
+    const vtable = Tool.VTable{
+        .execute = &vtableExecute,
+        .name = &vtableName,
+        .description = &vtableDesc,
+        .parameters_json = &vtableParams,
+    };
 
     pub fn tool(self: *CronRunTool) Tool {
         return .{
@@ -25,7 +24,26 @@ pub const CronRunTool = struct {
         };
     }
 
-    pub fn execute(_: *CronRunTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+        const self: *CronRunTool = @ptrCast(@alignCast(ptr));
+        return self.execute(allocator, args);
+    }
+
+    fn vtableName(_: *anyopaque) []const u8 {
+        return "cron_run";
+    }
+
+    fn vtableDesc(_: *anyopaque) []const u8 {
+        return "Force-run a cron job immediately by its ID, regardless of schedule.";
+    }
+
+    fn vtableParams(_: *anyopaque) []const u8 {
+        return 
+        \\{"type":"object","properties":{"job_id":{"type":"string","description":"The ID of the cron job to run"}},"required":["job_id"]}
+        ;
+    }
+
+    fn execute(_: *CronRunTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const job_id = root.getString(args, "job_id") orelse
             return ToolResult.fail("Missing 'job_id' parameter");
 

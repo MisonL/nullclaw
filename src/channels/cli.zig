@@ -1,5 +1,4 @@
 const std = @import("std");
-const platform = @import("../platform.zig");
 const root = @import("root.zig");
 
 /// CLI channel — reads from stdin, writes to stdout.
@@ -246,14 +245,6 @@ test "loadHistory reads file lines" {
     const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
     defer allocator.free(base);
     const tmp_path = try std.fs.path.join(allocator, &.{ base, "nullclaw_test_history" });
-    defer allocator.free(tmp_path);
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const tmp_path = try std.fs.path.join(allocator, &.{ base, "history_test" });
     defer allocator.free(tmp_path);
 
     // Write a temporary history file

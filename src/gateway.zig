@@ -638,7 +638,15 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
     defer if (config_opt) |*cfg| cfg.deinit();
 
     // ProviderHolder: concrete provider struct must outlive the accept loop.
-    var holder_opt: ?providers.ProviderHolder = null;
+    const ProviderHolder = union(enum) {
+        openrouter: providers.openrouter.OpenRouterProvider,
+        anthropic: providers.anthropic.AnthropicProvider,
+        openai: providers.openai.OpenAiProvider,
+        gemini: providers.gemini.GeminiProvider,
+        ollama: providers.ollama.OllamaProvider,
+    };
+
+    var holder_opt: ?ProviderHolder = null;
     var session_mgr_opt: ?session_mod.SessionManager = null;
     var tools_slice: []const tools_mod.Tool = &.{};
     var mem_opt: ?memory_mod.Memory = null;
@@ -663,11 +671,28 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
         }
 
         // Build provider holder from configured provider name.
-        holder_opt = providers.ProviderHolder.fromConfig(allocator, cfg.default_provider, cfg.defaultProviderKey());
+        const api_key = cfg.defaultProviderKey() orelse "";
+        holder_opt = if (std.mem.eql(u8, cfg.default_provider, "anthropic"))
+            .{ .anthropic = providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
+        else if (std.mem.eql(u8, cfg.default_provider, "openai"))
+            .{ .openai = providers.openai.OpenAiProvider.init(allocator, api_key) }
+        else if (std.mem.eql(u8, cfg.default_provider, "gemini") or
+            std.mem.eql(u8, cfg.default_provider, "google"))
+            .{ .gemini = providers.gemini.GeminiProvider.init(allocator, api_key) }
+        else if (std.mem.eql(u8, cfg.default_provider, "ollama"))
+            .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) }
+        else
+            .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
 
         // Build provider vtable from the holder.
         if (holder_opt) |*h| {
-            const provider_i: providers.Provider = h.provider();
+            const provider_i: providers.Provider = switch (h.*) {
+                .openrouter => |*p| p.provider(),
+                .anthropic => |*p| p.provider(),
+                .openai => |*p| p.provider(),
+                .gemini => |*p| p.provider(),
+                .ollama => |*p| p.provider(),
+            };
 
             // Optional memory backend.
             const db_path = std.fs.path.joinZ(allocator, &.{ cfg.workspace_dir, "memory.db" }) catch null;
@@ -752,71 +777,196 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
         const method_str = parts.next() orelse continue;
         const target = parts.next() orelse continue;
 
-        // Simple routing — extract base path (strip query string) and look up route
-        const Route = enum { health, ready, webhook, pair, telegram, whatsapp };
-        const route_map = std.StaticStringMap(Route).initComptime(.{
-            .{ "/health", .health },
-            .{ "/ready", .ready },
-            .{ "/webhook", .webhook },
-            .{ "/pair", .pair },
-            .{ "/telegram", .telegram },
-            .{ "/whatsapp", .whatsapp },
-        });
-        const base_path = if (std.mem.indexOfScalar(u8, target, '?')) |qi| target[0..qi] else target;
+        // Simple routing
         const is_post = std.mem.eql(u8, method_str, "POST");
         var response_status: []const u8 = "200 OK";
         var response_body: []const u8 = "";
         var pair_response_buf: [256]u8 = undefined;
 
-        if (route_map.get(base_path)) |route| switch (route) {
-            .health => {
-                response_body = if (isHealthOk()) "{\"status\":\"ok\"}" else "{\"status\":\"degraded\"}";
-            },
-            .ready => {
-                const readiness = health.checkRegistryReadiness(req_allocator) catch {
-                    response_status = "500 Internal Server Error";
-                    response_body = "{\"status\":\"not_ready\",\"checks\":[]}";
-                    continue;
-                };
-                const json_body = readiness.formatJson(req_allocator) catch {
-                    response_status = "500 Internal Server Error";
-                    response_body = "{\"status\":\"not_ready\",\"checks\":[]}";
-                    continue;
-                };
-                response_body = json_body;
-                if (readiness.status != .ready) {
-                    response_status = "503 Service Unavailable";
-                }
-            },
-            .webhook => {
-                if (!is_post) {
-                    response_status = "405 Method Not Allowed";
-                    response_body = "{\"error\":\"method not allowed\"}";
-                } else {
-                    // Bearer token validation
-                    const auth_header = extractHeader(raw, "Authorization");
-                    const bearer = if (auth_header) |ah| extractBearerToken(ah) else null;
-                    const pairing_guard = if (state.pairing_guard) |*guard| guard else null;
-                    if (!isWebhookAuthorized(pairing_guard, bearer)) {
-                        response_status = "401 Unauthorized";
-                        response_body = "{\"error\":\"unauthorized\"}";
-                    } else if (!state.rate_limiter.allowWebhook(state.allocator, "webhook")) {
-                        response_status = "429 Too Many Requests";
-                        response_body = "{\"error\":\"rate limited\"}";
+        if (std.mem.eql(u8, target, "/health") or std.mem.startsWith(u8, target, "/health?")) {
+            response_body = if (isHealthOk()) "{\"status\":\"ok\"}" else "{\"status\":\"degraded\"}";
+        } else if (std.mem.eql(u8, target, "/ready") or std.mem.startsWith(u8, target, "/ready?")) {
+            const readiness = health.checkRegistryReadiness(req_allocator) catch {
+                response_status = "500 Internal Server Error";
+                response_body = "{\"status\":\"not_ready\",\"checks\":[]}";
+                continue;
+            };
+            const json_body = readiness.formatJson(req_allocator) catch {
+                response_status = "500 Internal Server Error";
+                response_body = "{\"status\":\"not_ready\",\"checks\":[]}";
+                continue;
+            };
+            response_body = json_body;
+            if (readiness.status != .ready) {
+                response_status = "503 Service Unavailable";
+            }
+        } else if (is_post and (std.mem.eql(u8, target, "/webhook") or std.mem.startsWith(u8, target, "/webhook?"))) {
+            // Bearer token validation
+            const auth_header = extractHeader(raw, "Authorization");
+            const bearer = if (auth_header) |ah| extractBearerToken(ah) else null;
+            const pairing_guard = if (state.pairing_guard) |*guard| guard else null;
+            if (!isWebhookAuthorized(pairing_guard, bearer)) {
+                response_status = "401 Unauthorized";
+                response_body = "{\"error\":\"unauthorized\"}";
+            } else if (!state.rate_limiter.allowWebhook(state.allocator, "webhook")) {
+                response_status = "429 Too Many Requests";
+                response_body = "{\"error\":\"rate limited\"}";
+            } else {
+                // Extract body and process message
+                const body = extractBody(raw);
+                if (body) |b| {
+                    const msg_text = jsonStringField(b, "message") orelse jsonStringField(b, "text") orelse b;
+                    if (session_mgr_opt) |*sm| {
+                        // Build session key using bearer token if available
+                        var sk_buf: [128]u8 = undefined;
+                        const session_key = std.fmt.bufPrint(&sk_buf, "webhook:{s}", .{bearer orelse "anon"}) catch "webhook:anon";
+                        const reply = sm.processMessage(session_key, msg_text) catch null;
+                        if (reply) |r| {
+                            defer allocator.free(r);
+                            const json_resp = std.fmt.allocPrint(req_allocator, "{{\"status\":\"ok\",\"response\":\"{s}\"}}", .{r}) catch null;
+                            response_body = json_resp orelse "{\"status\":\"received\"}";
+                        } else {
+                            response_body = "{\"status\":\"received\"}";
+                        }
                     } else {
-                        // Extract body and process message
-                        const body = extractBody(raw);
-                        if (body) |b| {
-                            const msg_text = jsonStringField(b, "message") orelse jsonStringField(b, "text") orelse b;
+                        response_body = "{\"status\":\"received\"}";
+                    }
+                } else {
+                    response_body = "{\"status\":\"received\"}";
+                }
+            }
+        } else if (is_post and (std.mem.eql(u8, target, "/pair") or std.mem.startsWith(u8, target, "/pair?"))) {
+            if (!state.rate_limiter.allowPair(state.allocator, "pair")) {
+                response_status = "429 Too Many Requests";
+                response_body = "{\"error\":\"rate limited\"}";
+            } else {
+                if (state.pairing_guard) |*guard| {
+                    const pairing_code = extractHeader(raw, "X-Pairing-Code");
+                    switch (guard.attemptPair(pairing_code)) {
+                        .paired => |token| {
+                            defer allocator.free(token);
+                            if (formatPairSuccessResponse(&pair_response_buf, token)) |pair_resp| {
+                                response_body = pair_resp;
+                            } else {
+                                response_status = "500 Internal Server Error";
+                                response_body = "{\"error\":\"pairing response failed\"}";
+                            }
+                        },
+                        .missing_code => {
+                            response_status = "400 Bad Request";
+                            response_body = "{\"error\":\"missing X-Pairing-Code\"}";
+                        },
+                        .invalid_code => {
+                            response_status = "401 Unauthorized";
+                            response_body = "{\"error\":\"invalid pairing code\"}";
+                        },
+                        .already_paired => {
+                            response_status = "409 Conflict";
+                            response_body = "{\"error\":\"already paired\"}";
+                        },
+                        .disabled => {
+                            response_status = "403 Forbidden";
+                            response_body = "{\"error\":\"pairing disabled\"}";
+                        },
+                        .locked_out => {
+                            response_status = "429 Too Many Requests";
+                            response_body = "{\"error\":\"pairing locked out\"}";
+                        },
+                        .internal_error => {
+                            response_status = "500 Internal Server Error";
+                            response_body = "{\"error\":\"pairing failed\"}";
+                        },
+                    }
+                } else {
+                    response_status = "500 Internal Server Error";
+                    response_body = "{\"error\":\"pairing unavailable\"}";
+                }
+            }
+        } else if (is_post and (std.mem.eql(u8, target, "/telegram") or std.mem.startsWith(u8, target, "/telegram?"))) {
+            // POST /telegram — Telegram webhook mode
+            if (!state.rate_limiter.allowWebhook(state.allocator, "telegram")) {
+                response_status = "429 Too Many Requests";
+                response_body = "{\"error\":\"rate limited\"}";
+            } else {
+                const body = extractBody(raw);
+                if (body) |b| {
+                    // Parse Telegram update: extract message text and chat_id
+                    const msg_text = jsonStringField(b, "text");
+                    const chat_id = jsonIntField(b, "chat_id");
+
+                    if (msg_text != null and chat_id != null) {
+                        // Process the message in-process
+                        if (session_mgr_opt) |*sm| {
+                            var kb: [64]u8 = undefined;
+                            const sk = std.fmt.bufPrint(&kb, "telegram:{d}", .{chat_id.?}) catch "telegram:0";
+                            const reply = sm.processMessage(sk, msg_text.?) catch null;
+                            if (reply) |r| {
+                                defer allocator.free(r);
+                                // Send reply back to Telegram
+                                if (state.telegram_bot_token.len > 0) {
+                                    sendTelegramReply(req_allocator, state.telegram_bot_token, chat_id.?, r) catch {};
+                                }
+                                response_body = "{\"status\":\"ok\"}";
+                            } else {
+                                response_body = "{\"status\":\"received\"}";
+                            }
+                        } else {
+                            response_body = "{\"status\":\"received\"}";
+                        }
+                    } else {
+                        // No message text — could be an update_id-only update, just ack
+                        response_body = "{\"status\":\"ok\"}";
+                    }
+                } else {
+                    response_body = "{\"status\":\"received\"}";
+                }
+            }
+        } else if (std.mem.eql(u8, target, "/whatsapp") or std.mem.startsWith(u8, target, "/whatsapp?")) {
+            const is_get = std.mem.eql(u8, method_str, "GET");
+            if (is_get) {
+                // GET /whatsapp — Meta webhook verification
+                const mode = parseQueryParam(target, "hub.mode");
+                const token = parseQueryParam(target, "hub.verify_token");
+                const challenge = parseQueryParam(target, "hub.challenge");
+
+                if (mode != null and challenge != null and token != null and
+                    std.mem.eql(u8, mode.?, "subscribe") and
+                    state.whatsapp_verify_token.len > 0 and
+                    std.mem.eql(u8, token.?, state.whatsapp_verify_token))
+                {
+                    response_body = challenge.?;
+                } else {
+                    response_status = "403 Forbidden";
+                    response_body = "{\"error\":\"verification failed\"}";
+                }
+            } else if (is_post) {
+                // POST /whatsapp — incoming message from Meta
+                if (!state.rate_limiter.allowWebhook(state.allocator, "whatsapp")) {
+                    response_status = "429 Too Many Requests";
+                    response_body = "{\"error\":\"rate limited\"}";
+                } else if (state.whatsapp_app_secret.len > 0) sig_check: {
+                    // HMAC-SHA256 signature verification (when app_secret is configured)
+                    const sig_header = extractHeader(raw, "X-Hub-Signature-256") orelse {
+                        response_status = "403 Forbidden";
+                        response_body = "{\"error\":\"missing signature\"}";
+                        break :sig_check;
+                    };
+                    const body_for_sig = extractBody(raw) orelse "";
+                    if (!verifyWhatsappSignature(body_for_sig, sig_header, state.whatsapp_app_secret)) {
+                        response_status = "403 Forbidden";
+                        response_body = "{\"error\":\"invalid signature\"}";
+                        break :sig_check;
+                    }
+                    // Signature valid — proceed with message processing
+                    const body = if (body_for_sig.len > 0) body_for_sig else null;
+                    if (body) |b| {
+                        const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body");
+                        if (msg_text) |mt| {
                             if (session_mgr_opt) |*sm| {
-                                // Build session key using bearer token if available
-                                var sk_buf: [128]u8 = undefined;
-                                const session_key = std.fmt.bufPrint(&sk_buf, "webhook:{s}", .{bearer orelse "anon"}) catch "webhook:anon";
-                                const reply = sm.processMessage(session_key, msg_text) catch null;
+                                const reply = sm.processMessage("whatsapp", mt) catch null;
                                 if (reply) |r| {
                                     defer allocator.free(r);
-                                    const json_resp = std.fmt.allocPrint(req_allocator, "{{\"status\":\"ok\",\"response\":\"{s}\"}}", .{r}) catch null;
-                                    response_body = json_resp orelse "{\"status\":\"received\"}";
+                                    response_body = req_allocator.dupe(u8, r) catch "{\"status\":\"received\"}";
                                 } else {
                                     response_body = "{\"status\":\"received\"}";
                                 }
@@ -826,88 +976,20 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
                         } else {
                             response_body = "{\"status\":\"received\"}";
                         }
-                    }
-                }
-            },
-            .pair => {
-                if (!is_post) {
-                    response_status = "405 Method Not Allowed";
-                    response_body = "{\"error\":\"method not allowed\"}";
-                } else if (!state.rate_limiter.allowPair(state.allocator, "pair")) {
-                    response_status = "429 Too Many Requests";
-                    response_body = "{\"error\":\"rate limited\"}";
-                } else {
-                    if (state.pairing_guard) |*guard| {
-                        const pairing_code = extractHeader(raw, "X-Pairing-Code");
-                        switch (guard.attemptPair(pairing_code)) {
-                            .paired => |token| {
-                                defer allocator.free(token);
-                                if (formatPairSuccessResponse(&pair_response_buf, token)) |pair_resp| {
-                                    response_body = pair_resp;
-                                } else {
-                                    response_status = "500 Internal Server Error";
-                                    response_body = "{\"error\":\"pairing response failed\"}";
-                                }
-                            },
-                            .missing_code => {
-                                response_status = "400 Bad Request";
-                                response_body = "{\"error\":\"missing X-Pairing-Code\"}";
-                            },
-                            .invalid_code => {
-                                response_status = "401 Unauthorized";
-                                response_body = "{\"error\":\"invalid pairing code\"}";
-                            },
-                            .already_paired => {
-                                response_status = "409 Conflict";
-                                response_body = "{\"error\":\"already paired\"}";
-                            },
-                            .disabled => {
-                                response_status = "403 Forbidden";
-                                response_body = "{\"error\":\"pairing disabled\"}";
-                            },
-                            .locked_out => {
-                                response_status = "429 Too Many Requests";
-                                response_body = "{\"error\":\"pairing locked out\"}";
-                            },
-                            .internal_error => {
-                                response_status = "500 Internal Server Error";
-                                response_body = "{\"error\":\"pairing failed\"}";
-                            },
-                        }
                     } else {
-                        response_status = "500 Internal Server Error";
-                        response_body = "{\"error\":\"pairing unavailable\"}";
+                        response_body = "{\"status\":\"received\"}";
                     }
-                }
-            },
-            .telegram => {
-                if (!is_post) {
-                    response_status = "405 Method Not Allowed";
-                    response_body = "{\"error\":\"method not allowed\"}";
-                } else if (!state.rate_limiter.allowWebhook(state.allocator, "telegram")) {
-                    // POST /telegram — Telegram webhook mode
-                    response_status = "429 Too Many Requests";
-                    response_body = "{\"error\":\"rate limited\"}";
                 } else {
                     const body = extractBody(raw);
                     if (body) |b| {
-                        // Parse Telegram update: extract message text and chat_id
-                        const msg_text = jsonStringField(b, "text");
-                        const chat_id = jsonIntField(b, "chat_id");
-
-                        if (msg_text != null and chat_id != null) {
-                            // Process the message in-process
+                        // Try to extract message text from WhatsApp payload
+                        const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body");
+                        if (msg_text) |mt| {
                             if (session_mgr_opt) |*sm| {
-                                var kb: [64]u8 = undefined;
-                                const sk = std.fmt.bufPrint(&kb, "telegram:{d}", .{chat_id.?}) catch "telegram:0";
-                                const reply = sm.processMessage(sk, msg_text.?) catch null;
+                                const reply = sm.processMessage("whatsapp", mt) catch null;
                                 if (reply) |r| {
                                     defer allocator.free(r);
-                                    // Send reply back to Telegram
-                                    if (state.telegram_bot_token.len > 0) {
-                                        sendTelegramReply(req_allocator, state.telegram_bot_token, chat_id.?, r) catch {};
-                                    }
-                                    response_body = "{\"status\":\"ok\"}";
+                                    response_body = req_allocator.dupe(u8, r) catch "{\"status\":\"received\"}";
                                 } else {
                                     response_body = "{\"status\":\"received\"}";
                                 }
@@ -915,101 +997,16 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
                                 response_body = "{\"status\":\"received\"}";
                             }
                         } else {
-                            // No message text — could be an update_id-only update, just ack
-                            response_body = "{\"status\":\"ok\"}";
+                            response_body = "{\"status\":\"received\"}";
                         }
                     } else {
                         response_body = "{\"status\":\"received\"}";
                     }
                 }
-            },
-            .whatsapp => {
-                const is_get = std.mem.eql(u8, method_str, "GET");
-                if (is_get) {
-                    // GET /whatsapp — Meta webhook verification
-                    const mode = parseQueryParam(target, "hub.mode");
-                    const token = parseQueryParam(target, "hub.verify_token");
-                    const challenge = parseQueryParam(target, "hub.challenge");
-
-                    if (mode != null and challenge != null and token != null and
-                        std.mem.eql(u8, mode.?, "subscribe") and
-                        state.whatsapp_verify_token.len > 0 and
-                        std.mem.eql(u8, token.?, state.whatsapp_verify_token))
-                    {
-                        response_body = challenge.?;
-                    } else {
-                        response_status = "403 Forbidden";
-                        response_body = "{\"error\":\"verification failed\"}";
-                    }
-                } else if (is_post) {
-                    // POST /whatsapp — incoming message from Meta
-                    if (!state.rate_limiter.allowWebhook(state.allocator, "whatsapp")) {
-                        response_status = "429 Too Many Requests";
-                        response_body = "{\"error\":\"rate limited\"}";
-                    } else if (state.whatsapp_app_secret.len > 0) sig_check: {
-                        // HMAC-SHA256 signature verification (when app_secret is configured)
-                        const sig_header = extractHeader(raw, "X-Hub-Signature-256") orelse {
-                            response_status = "403 Forbidden";
-                            response_body = "{\"error\":\"missing signature\"}";
-                            break :sig_check;
-                        };
-                        const body_for_sig = extractBody(raw) orelse "";
-                        if (!verifyWhatsappSignature(body_for_sig, sig_header, state.whatsapp_app_secret)) {
-                            response_status = "403 Forbidden";
-                            response_body = "{\"error\":\"invalid signature\"}";
-                            break :sig_check;
-                        }
-                        // Signature valid — proceed with message processing
-                        const body = if (body_for_sig.len > 0) body_for_sig else null;
-                        if (body) |b| {
-                            const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body");
-                            if (msg_text) |mt| {
-                                if (session_mgr_opt) |*sm| {
-                                    const reply = sm.processMessage("whatsapp", mt) catch null;
-                                    if (reply) |r| {
-                                        defer allocator.free(r);
-                                        response_body = req_allocator.dupe(u8, r) catch "{\"status\":\"received\"}";
-                                    } else {
-                                        response_body = "{\"status\":\"received\"}";
-                                    }
-                                } else {
-                                    response_body = "{\"status\":\"received\"}";
-                                }
-                            } else {
-                                response_body = "{\"status\":\"received\"}";
-                            }
-                        } else {
-                            response_body = "{\"status\":\"received\"}";
-                        }
-                    } else {
-                        const body = extractBody(raw);
-                        if (body) |b| {
-                            // Try to extract message text from WhatsApp payload
-                            const msg_text = jsonStringField(b, "text") orelse jsonStringField(b, "body");
-                            if (msg_text) |mt| {
-                                if (session_mgr_opt) |*sm| {
-                                    const reply = sm.processMessage("whatsapp", mt) catch null;
-                                    if (reply) |r| {
-                                        defer allocator.free(r);
-                                        response_body = req_allocator.dupe(u8, r) catch "{\"status\":\"received\"}";
-                                    } else {
-                                        response_body = "{\"status\":\"received\"}";
-                                    }
-                                } else {
-                                    response_body = "{\"status\":\"received\"}";
-                                }
-                            } else {
-                                response_body = "{\"status\":\"received\"}";
-                            }
-                        } else {
-                            response_body = "{\"status\":\"received\"}";
-                        }
-                    }
-                } else {
-                    response_status = "405 Method Not Allowed";
-                    response_body = "{\"error\":\"method not allowed\"}";
-                }
-            },
+            } else {
+                response_status = "405 Method Not Allowed";
+                response_body = "{\"error\":\"method not allowed\"}";
+            }
         } else {
             response_status = "404 Not Found";
             response_body = "{\"error\":\"not found\"}";

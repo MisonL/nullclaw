@@ -12,13 +12,12 @@ pub const SpawnTool = struct {
     default_channel: ?[]const u8 = null,
     default_chat_id: ?[]const u8 = null,
 
-    pub const tool_name = "spawn";
-    pub const tool_description = "Spawn a background subagent to work on a task asynchronously. Returns a task ID immediately. Results are delivered as system messages when complete.";
-    pub const tool_params =
-        \\{"type":"object","properties":{"task":{"type":"string","minLength":1,"description":"The task/prompt for the subagent"},"label":{"type":"string","description":"Optional human-readable label for tracking"}},"required":["task"]}
-    ;
-
-    const vtable = root.ToolVTable(@This());
+    const vtable = Tool.VTable{
+        .execute = &vtableExecute,
+        .name = &vtableName,
+        .description = &vtableDesc,
+        .parameters_json = &vtableParams,
+    };
 
     pub fn tool(self: *SpawnTool) Tool {
         return .{
@@ -27,7 +26,26 @@ pub const SpawnTool = struct {
         };
     }
 
-    pub fn execute(self: *SpawnTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+        const self: *SpawnTool = @ptrCast(@alignCast(ptr));
+        return self.execute(allocator, args);
+    }
+
+    fn vtableName(_: *anyopaque) []const u8 {
+        return "spawn";
+    }
+
+    fn vtableDesc(_: *anyopaque) []const u8 {
+        return "Spawn a background subagent to work on a task asynchronously. Returns a task ID immediately. Results are delivered as system messages when complete.";
+    }
+
+    fn vtableParams(_: *anyopaque) []const u8 {
+        return 
+        \\{"type":"object","properties":{"task":{"type":"string","minLength":1,"description":"The task/prompt for the subagent"},"label":{"type":"string","description":"Optional human-readable label for tracking"}},"required":["task"]}
+        ;
+    }
+
+    fn execute(self: *SpawnTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const task = root.getString(args, "task") orelse
             return ToolResult.fail("Missing 'task' parameter");
 

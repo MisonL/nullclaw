@@ -1011,11 +1011,6 @@ test "loadSkill reads manifest and instructions" {
         try f.writeAll("# Test Skill\nDo the test thing.");
     }
 
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const skill_dir = try std.fs.path.join(allocator, &.{ base, "skills", "test-skill" });
-    defer allocator.free(skill_dir);
-
     const skill = try loadSkill(allocator, skill_dir);
     defer freeSkill(allocator, &skill);
 
@@ -1048,11 +1043,6 @@ test "loadSkill without SKILL.md still works" {
         defer f.close();
         try f.writeAll("{\"name\": \"bare-skill\", \"version\": \"0.5.0\"}");
     }
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const skill_dir = try std.fs.path.join(allocator, &.{ base, "skills", "bare-skill" });
-    defer allocator.free(skill_dir);
 
     const skill = try loadSkill(allocator, skill_dir);
     defer freeSkill(allocator, &skill);
@@ -1112,9 +1102,6 @@ test "listSkills discovers skills in subdirectories" {
         defer f.close();
         try f.writeAll("Not a skill directory");
     }
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
 
     const skills = try listSkills(allocator, base);
     defer freeSkills(allocator, skills);
@@ -1179,7 +1166,6 @@ test "installSkillFromPath and removeSkill roundtrip" {
     const source_md = try std.fs.path.join(allocator, &.{ source, "SKILL.md" });
     defer allocator.free(source_md);
 
-    // Write source skill files
     {
         const f = try std.fs.createFileAbsolute(source_manifest, .{});
         defer f.close();
@@ -1190,13 +1176,6 @@ test "installSkillFromPath and removeSkill roundtrip" {
         defer f.close();
         try f.writeAll("# Instructions\nInstall me.");
     }
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const workspace = try std.fs.path.join(allocator, &.{ base, "workspace" });
-    defer allocator.free(workspace);
-    const source = try std.fs.path.join(allocator, &.{ base, "source" });
-    defer allocator.free(source);
 
     // Install
     try installSkillFromPath(allocator, source, workspace);
@@ -1366,11 +1345,6 @@ test "loadCommunitySkills loads .md files" {
         defer f.close();
         try f.writeAll("Not a skill.");
     }
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const community_dir = try std.fs.path.join(allocator, &.{ base, "community" });
-    defer allocator.free(community_dir);
 
     const skills = try loadCommunitySkills(allocator, community_dir);
     defer freeSkills(allocator, skills);
@@ -1609,9 +1583,6 @@ test "loadSkill reads always field" {
         try f.writeAll("{\"name\": \"always-skill\", \"always\": true, \"requires_bins\": [\"ls\"]}");
     }
 
-    const skill_dir = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(skill_dir);
-
     const skill = try loadSkill(allocator, skill_dir);
     defer freeSkill(allocator, &skill);
 
@@ -1681,13 +1652,6 @@ test "listSkillsMerged workspace overrides builtin" {
         defer f.close();
         try f.writeAll("{\"name\": \"ws-only\", \"description\": \"only in workspace\"}");
     }
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const builtin_base = try std.fs.path.join(allocator, &.{ base, "builtin" });
-    defer allocator.free(builtin_base);
-    const ws_base = try std.fs.path.join(allocator, &.{ base, "workspace" });
-    defer allocator.free(ws_base);
 
     const skills = try listSkillsMerged(allocator, builtin_base, ws_base);
     defer freeSkills(allocator, skills);
@@ -1848,11 +1812,6 @@ test "countMdFiles counts only .md files" {
         const f = try std.fs.createFileAbsolute(path, .{});
         f.close();
     }
-
-    const base = try tmp.dir.realpathAlloc(allocator, ".");
-    defer allocator.free(base);
-    const dir = try std.fs.path.join(allocator, &.{ base, "countmd" });
-    defer allocator.free(dir);
 
     const count = countMdFiles(dir);
     try std.testing.expectEqual(@as(u32, 3), count);

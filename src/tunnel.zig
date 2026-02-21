@@ -1,4 +1,5 @@
 const std = @import("std");
+const config = @import("config.zig");
 
 // Tunnel -- ngrok/cloudflare/tailscale/custom tunnel management.
 //

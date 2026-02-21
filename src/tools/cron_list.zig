@@ -9,13 +9,12 @@ const loadScheduler = @import("cron_add.zig").loadScheduler;
 
 /// CronList tool — lists all scheduled cron jobs with their status and next run time.
 pub const CronListTool = struct {
-    pub const tool_name = "cron_list";
-    pub const tool_description = "List all scheduled cron jobs with their status and next run time.";
-    pub const tool_params =
-        \\{"type":"object","properties":{}}
-    ;
-
-    const vtable = root.ToolVTable(@This());
+    const vtable = Tool.VTable{
+        .execute = &vtableExecute,
+        .name = &vtableName,
+        .description = &vtableDesc,
+        .parameters_json = &vtableParams,
+    };
 
     pub fn tool(self: *CronListTool) Tool {
         return .{
@@ -24,7 +23,26 @@ pub const CronListTool = struct {
         };
     }
 
-    pub fn execute(_: *CronListTool, allocator: std.mem.Allocator, _: JsonObjectMap) !ToolResult {
+    fn vtableExecute(ptr: *anyopaque, allocator: std.mem.Allocator, args: JsonObjectMap) anyerror!ToolResult {
+        const self: *CronListTool = @ptrCast(@alignCast(ptr));
+        return self.execute(allocator, args);
+    }
+
+    fn vtableName(_: *anyopaque) []const u8 {
+        return "cron_list";
+    }
+
+    fn vtableDesc(_: *anyopaque) []const u8 {
+        return "List all scheduled cron jobs with their status and next run time.";
+    }
+
+    fn vtableParams(_: *anyopaque) []const u8 {
+        return 
+        \\{"type":"object","properties":{}}
+        ;
+    }
+
+    fn execute(_: *CronListTool, allocator: std.mem.Allocator, _: JsonObjectMap) !ToolResult {
         var scheduler = loadScheduler(allocator) catch {
             return ToolResult{ .success = true, .output = try allocator.dupe(u8, "No scheduled cron jobs.") };
         };

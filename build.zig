@@ -4,7 +4,6 @@ const builtin = @import("builtin");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const app_version = b.option([]const u8, "version", "Version string embedded in the binary") orelse "2026.2.21";
 
     const sqlite3_dep = b.dependency("sqlite3", .{
         .target = target,
@@ -13,17 +12,12 @@ pub fn build(b: *std.Build) void {
     const sqlite3 = sqlite3_dep.artifact("sqlite3");
     sqlite3.root_module.addCMacro("SQLITE_ENABLE_FTS5", "1");
 
-    var build_options = b.addOptions();
-    build_options.addOption([]const u8, "version", app_version);
-    const build_options_module = build_options.createModule();
-
     // ---------- library module (importable by consumers) ----------
     const lib_mod = b.addModule("nullclaw", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    lib_mod.addImport("build_options", build_options_module);
     lib_mod.linkLibrary(sqlite3);
 
     // ---------- executable ----------
@@ -38,7 +32,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    exe.root_module.addImport("build_options", build_options_module);
 
     // Link SQLite on the compile step (not the module)
     exe.linkLibrary(sqlite3);
@@ -54,9 +47,7 @@ pub fn build(b: *std.Build) void {
 
     // macOS: strip local symbols post-install (Zig strip only removes debug info)
     if (optimize != .Debug and builtin.os.tag == .macos) {
-        const strip_cmd = b.addSystemCommand(&.{"strip"});
-        strip_cmd.addArgs(&.{"-x"});
-        strip_cmd.addFileArg(exe.getEmittedBin());
+        const strip_cmd = b.addSystemCommand(&.{ "strip", "-x", "zig-out/bin/nullclaw" });
         strip_cmd.step.dependOn(b.getInstallStep());
         b.default_step = &strip_cmd.step;
     }

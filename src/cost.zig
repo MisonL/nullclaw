@@ -1,4 +1,5 @@
 const std = @import("std");
+const util = @import("util.zig");
 
 /// Token usage information from a single API call.
 pub const TokenUsage = struct {
