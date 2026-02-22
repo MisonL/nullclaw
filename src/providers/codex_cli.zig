@@ -38,6 +38,7 @@ pub const CodexCliProvider = struct {
         .chatWithSystem = chatWithSystemImpl,
         .chat = chatImpl,
         .supportsNativeTools = supportsNativeToolsImpl,
+        .supports_vision = supportsVisionImpl,
         .getName = getNameImpl,
         .deinit = deinitImpl,
     };
@@ -72,6 +73,10 @@ pub const CodexCliProvider = struct {
     }
 
     fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn supportsVisionImpl(_: *anyopaque) bool {
         return false;
     }
 
@@ -209,6 +214,8 @@ test "CodexCliProvider vtable has correct function pointers" {
     var dummy: u8 = 0;
     try std.testing.expectEqualStrings("codex-cli", vtable.getName(@ptrCast(&dummy)));
     try std.testing.expect(!vtable.supportsNativeTools(@ptrCast(&dummy)));
+    try std.testing.expect(vtable.supports_vision != null);
+    try std.testing.expect(!vtable.supports_vision.?(@ptrCast(&dummy)));
 }
 
 test "CodexCliProvider supportsNativeTools returns false" {

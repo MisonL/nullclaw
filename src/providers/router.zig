@@ -111,6 +111,7 @@ pub const RouterProvider = struct {
         .chatWithSystem = chatWithSystemImpl,
         .chat = chatImpl,
         .supportsNativeTools = supportsNativeToolsImpl,
+        .supports_vision = supportsVisionImpl,
         .getName = getNameImpl,
         .deinit = deinitImpl,
     };
@@ -156,6 +157,12 @@ pub const RouterProvider = struct {
         return self.providers[self.default_index].supportsNativeTools();
     }
 
+    fn supportsVisionImpl(ptr: *anyopaque) bool {
+        const self: *RouterProvider = @ptrCast(@alignCast(ptr));
+        if (self.default_index >= self.providers.len) return false;
+        return self.providers[self.default_index].supportsVision();
+    }
+
     fn getNameImpl(_: *anyopaque) []const u8 {
         return "router";
     }
@@ -194,6 +201,7 @@ const MockProvider = struct {
         .chatWithSystem = mockChatWithSystem,
         .chat = mockChat,
         .supportsNativeTools = mockSupportsNativeTools,
+        .supports_vision = mockSupportsVision,
         .getName = mockGetName,
         .deinit = mockDeinit,
     };
@@ -226,6 +234,10 @@ const MockProvider = struct {
     fn mockSupportsNativeTools(ptr: *anyopaque) bool {
         const self: *MockProvider = @ptrCast(@alignCast(ptr));
         return self.native_tools;
+    }
+
+    fn mockSupportsVision(_: *anyopaque) bool {
+        return true;
     }
 
     fn mockGetName(_: *anyopaque) []const u8 {

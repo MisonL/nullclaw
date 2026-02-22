@@ -141,6 +141,32 @@ fn jsonEscapeString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return try out.toOwnedSlice(allocator);
 }
 
+fn extractDataUriPayload(image: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, image, "data:")) return image;
+    const comma = std.mem.indexOfScalar(u8, image, ',') orelse return image;
+    const payload = std.mem.trim(u8, image[comma + 1 ..], " \t\r\n");
+    if (payload.len == 0) return image;
+    return payload;
+}
+
+fn appendOllamaImageValue(
+    buf: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    has_images: *bool,
+    value: []const u8,
+) !void {
+    if (!has_images.*) {
+        try buf.appendSlice(allocator, ",\"images\":[\"");
+        has_images.* = true;
+    } else {
+        try buf.appendSlice(allocator, ",\"");
+    }
+    const escaped = try jsonEscapeString(allocator, value);
+    defer allocator.free(escaped);
+    try buf.appendSlice(allocator, escaped);
+    try buf.append(allocator, '"');
+}
+
 /// Ollama local LLM provider.
 ///
 /// Endpoints:
@@ -239,6 +265,7 @@ pub const OllamaProvider = struct {
         .chatWithSystem = chatWithSystemImpl,
         .chat = chatImpl,
         .supportsNativeTools = supportsNativeToolsImpl,
+        .supports_vision = supportsVisionImpl,
         .getName = getNameImpl,
         .deinit = deinitImpl,
     };
@@ -291,6 +318,10 @@ pub const OllamaProvider = struct {
         return false;
     }
 
+    fn supportsVisionImpl(_: *anyopaque) bool {
+        return true;
+    }
+
     fn getNameImpl(_: *anyopaque) []const u8 {
         return "Ollama";
     }
@@ -320,7 +351,29 @@ fn buildChatRequestBody(
         const escaped = try jsonEscapeString(allocator, msg.content);
         defer allocator.free(escaped);
         try buf.appendSlice(allocator, escaped);
-        try buf.appendSlice(allocator, "\"}");
+        try buf.append(allocator, '"');
+        // Append images array if content_parts contains base64 images
+        if (msg.content_parts) |parts| {
+            var has_images = false;
+            for (parts) |part| {
+                switch (part) {
+                    .image_base64 => |img| {
+                        try appendOllamaImageValue(&buf, allocator, &has_images, img.data);
+                    },
+                    .image_url => |img| {
+                        // Ollama API only supports base64-encoded images, not URLs.
+                        // Extract payload from data: URIs; skip regular HTTP URLs.
+                        if (std.mem.startsWith(u8, img.url, "data:")) {
+                            const value = extractDataUriPayload(img.url);
+                            try appendOllamaImageValue(&buf, allocator, &has_images, value);
+                        }
+                    },
+                    else => {},
+                }
+            }
+            if (has_images) try buf.append(allocator, ']');
+        }
+        try buf.append(allocator, '}');
     }
 
     try buf.appendSlice(allocator, "],\"stream\":false,\"options\":{\"temperature\":");
@@ -408,6 +461,79 @@ test "extractToolNameAndArgs with tool. prefix" {
 test "extractToolNameAndArgs with tools. prefix" {
     const result = extractToolNameAndArgs(std.testing.allocator, "tools.file_read", .null);
     try std.testing.expectEqualStrings("file_read", result.name);
+}
+
+test "ollama buildChatRequestBody with images" {
+    const alloc = std.testing.allocator;
+    const cp = &[_]root.ContentPart{
+        .{ .text = "Describe this image" },
+        .{ .image_base64 = .{ .data = "iVBOR", .media_type = "image/png" } },
+    };
+    var msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "Describe this image", .content_parts = cp },
+    };
+    const body = try buildChatRequestBody(alloc, .{ .messages = &msgs, .model = "llava" }, "llava", 0.7);
+    defer alloc.free(body);
+    // Verify valid JSON and images array present
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const messages_arr = parsed.value.object.get("messages").?.array;
+    try std.testing.expectEqual(@as(usize, 1), messages_arr.items.len);
+    const msg_obj = messages_arr.items[0].object;
+    try std.testing.expectEqualStrings("Describe this image", msg_obj.get("content").?.string);
+    const images = msg_obj.get("images").?.array;
+    try std.testing.expectEqual(@as(usize, 1), images.items.len);
+    try std.testing.expectEqualStrings("iVBOR", images.items[0].string);
+}
+
+test "ollama buildChatRequestBody without content_parts" {
+    const alloc = std.testing.allocator;
+    var msgs = [_]root.ChatMessage{
+        root.ChatMessage.user("Hello"),
+    };
+    const body = try buildChatRequestBody(alloc, .{ .messages = &msgs, .model = "llama3" }, "llama3", 0.7);
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const messages_arr = parsed.value.object.get("messages").?.array;
+    const msg_obj = messages_arr.items[0].object;
+    // No images field when no content_parts
+    try std.testing.expect(msg_obj.get("images") == null);
+}
+
+test "ollama buildChatRequestBody with data URI image_url extracts base64 payload" {
+    const alloc = std.testing.allocator;
+    const cp = &[_]root.ContentPart{
+        .{ .image_url = .{ .url = "data:image/png;base64,iVBORw0KGgo=" } },
+    };
+    var msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "Describe", .content_parts = cp },
+    };
+    const body = try buildChatRequestBody(alloc, .{ .messages = &msgs, .model = "llava" }, "llava", 0.7);
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const msg_obj = parsed.value.object.get("messages").?.array.items[0].object;
+    const images = msg_obj.get("images").?.array;
+    try std.testing.expectEqual(@as(usize, 1), images.items.len);
+    try std.testing.expectEqualStrings("iVBORw0KGgo=", images.items[0].string);
+}
+
+test "ollama buildChatRequestBody skips HTTP URL image_url" {
+    const alloc = std.testing.allocator;
+    const cp = &[_]root.ContentPart{
+        .{ .image_url = .{ .url = "https://example.com/cat.jpg" } },
+    };
+    var msgs = [_]root.ChatMessage{
+        .{ .role = .user, .content = "Describe", .content_parts = cp },
+    };
+    const body = try buildChatRequestBody(alloc, .{ .messages = &msgs, .model = "llava" }, "llava", 0.7);
+    defer alloc.free(body);
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, body, .{});
+    defer parsed.deinit();
+    const msg_obj = parsed.value.object.get("messages").?.array.items[0].object;
+    // HTTP URLs are not supported by Ollama — should be skipped
+    try std.testing.expect(msg_obj.get("images") == null);
 }
 
 test "extractToolNameAndArgs with nested tool_call wrapper" {

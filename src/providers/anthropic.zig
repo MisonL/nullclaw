@@ -205,6 +205,7 @@ pub const AnthropicProvider = struct {
         .chatWithSystem = chatWithSystemImpl,
         .chat = chatImpl,
         .supportsNativeTools = supportsNativeToolsImpl,
+        .supports_vision = supportsVisionImpl,
         .getName = getNameImpl,
         .deinit = deinitImpl,
         .stream_chat = streamChatImpl,
@@ -294,6 +295,10 @@ pub const AnthropicProvider = struct {
     }
 
     fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn supportsVisionImpl(_: *anyopaque) bool {
         return true;
     }
 
