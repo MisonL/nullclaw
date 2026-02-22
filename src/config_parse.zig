@@ -306,6 +306,15 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             if (rel.object.get("provider_backoff_ms")) |v| {
                 if (v == .integer) self.reliability.provider_backoff_ms = @intCast(v.integer);
             }
+            if (rel.object.get("model_fallback_cooldown_secs")) |v| {
+                if (v == .integer) self.reliability.model_fallback_cooldown_secs = @intCast(v.integer);
+            }
+            if (rel.object.get("model_probe_interval_secs")) |v| {
+                if (v == .integer) self.reliability.model_probe_interval_secs = @intCast(v.integer);
+            }
+            if (rel.object.get("probe_primary_during_cooldown")) |v| {
+                if (v == .bool) self.reliability.probe_primary_during_cooldown = v.bool;
+            }
             if (rel.object.get("channel_initial_backoff_secs")) |v| {
                 if (v == .integer) self.reliability.channel_initial_backoff_secs = @intCast(v.integer);
             }
@@ -317,6 +326,29 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (rel.object.get("scheduler_retries")) |v| {
                 if (v == .integer) self.reliability.scheduler_retries = @intCast(v.integer);
+            }
+            if (rel.object.get("fallback_providers")) |v| {
+                if (v == .array) self.reliability.fallback_providers = try parseStringArray(owned_alloc, v.array);
+            }
+            if (rel.object.get("api_keys")) |v| {
+                if (v == .array) self.reliability.api_keys = try parseStringArray(owned_alloc, v.array);
+            }
+            if (rel.object.get("model_fallbacks")) |v| {
+                if (v == .array) {
+                    var list: std.ArrayListUnmanaged(types.ModelFallbackEntry) = .empty;
+                    try list.ensureTotalCapacity(owned_alloc, @intCast(v.array.items.len));
+                    for (v.array.items) |item| {
+                        if (item != .object) continue;
+                        const model_val = item.object.get("model") orelse continue;
+                        const fallbacks_val = item.object.get("fallbacks") orelse continue;
+                        if (model_val != .string or fallbacks_val != .array) continue;
+                        try list.append(owned_alloc, .{
+                            .model = try owned_alloc.dupe(u8, model_val.string),
+                            .fallbacks = try parseStringArray(owned_alloc, fallbacks_val.array),
+                        });
+                    }
+                    self.reliability.model_fallbacks = try list.toOwnedSlice(owned_alloc);
+                }
             }
         }
     }
@@ -368,6 +400,25 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (ag.object.get("message_timeout_secs")) |v| {
                 if (v == .integer) self.agent.message_timeout_secs = @intCast(v.integer);
+            }
+            if (ag.object.get("skills_prompt_limits")) |spl| {
+                if (spl == .object) {
+                    if (spl.object.get("max_skills_in_prompt")) |v| {
+                        if (v == .integer) self.agent.skills_prompt_limits.max_skills_in_prompt = @intCast(v.integer);
+                    }
+                    if (spl.object.get("max_skills_prompt_chars")) |v| {
+                        if (v == .integer) self.agent.skills_prompt_limits.max_skills_prompt_chars = @intCast(v.integer);
+                    }
+                    if (spl.object.get("max_skill_file_bytes")) |v| {
+                        if (v == .integer) self.agent.skills_prompt_limits.max_skill_file_bytes = @intCast(v.integer);
+                    }
+                    if (spl.object.get("max_candidates_per_root")) |v| {
+                        if (v == .integer) self.agent.skills_prompt_limits.max_candidates_per_root = @intCast(v.integer);
+                    }
+                    if (spl.object.get("max_skills_loaded_per_source")) |v| {
+                        if (v == .integer) self.agent.skills_prompt_limits.max_skills_loaded_per_source = @intCast(v.integer);
+                    }
+                }
             }
         }
     }

@@ -190,6 +190,7 @@ pub const StreamCallback = *const fn (ctx: *anyopaque, chunk: StreamChunk) void;
 /// Result of a streaming chat call (accumulated after stream completes).
 pub const StreamChatResult = struct {
     content: ?[]const u8 = null,
+    tool_calls: []const ToolCall = &.{},
     usage: TokenUsage = .{},
     model: []const u8 = "",
 };
@@ -362,6 +363,7 @@ pub const Provider = struct {
         callback(callback_ctx, StreamChunk.finalChunk());
         return .{
             .content = response.content,
+            .tool_calls = response.tool_calls,
             .usage = response.usage,
             .model = response.model,
         };

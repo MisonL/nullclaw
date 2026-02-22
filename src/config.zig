@@ -14,6 +14,7 @@ pub const RuntimeConfig = config_types.RuntimeConfig;
 pub const ModelFallbackEntry = config_types.ModelFallbackEntry;
 pub const ReliabilityConfig = config_types.ReliabilityConfig;
 pub const SchedulerConfig = config_types.SchedulerConfig;
+pub const SkillsPromptLimits = config_types.SkillsPromptLimits;
 pub const AgentConfig = config_types.AgentConfig;
 pub const ModelRouteConfig = config_types.ModelRouteConfig;
 pub const HeartbeatConfig = config_types.HeartbeatConfig;
@@ -365,6 +366,27 @@ pub const Config = struct {
         } else {
             try w.print("    \"max_cost_per_day_cents\": {d}\n", .{self.autonomy.max_cost_per_day_cents});
         }
+        try w.print("  }},\n", .{});
+
+        // Agent
+        try w.print("  \"agent\": {{\n", .{});
+        try w.print("    \"compact_context\": {s},\n", .{if (self.agent.compact_context) "true" else "false"});
+        try w.print("    \"max_tool_iterations\": {d},\n", .{self.agent.max_tool_iterations});
+        try w.print("    \"max_history_messages\": {d},\n", .{self.agent.max_history_messages});
+        try w.print("    \"parallel_tools\": {s},\n", .{if (self.agent.parallel_tools) "true" else "false"});
+        try w.print("    \"tool_dispatcher\": \"{s}\",\n", .{self.agent.tool_dispatcher});
+        try w.print("    \"session_idle_timeout_secs\": {d},\n", .{self.agent.session_idle_timeout_secs});
+        try w.print("    \"compaction_keep_recent\": {d},\n", .{self.agent.compaction_keep_recent});
+        try w.print("    \"compaction_max_summary_chars\": {d},\n", .{self.agent.compaction_max_summary_chars});
+        try w.print("    \"compaction_max_source_chars\": {d},\n", .{self.agent.compaction_max_source_chars});
+        try w.print("    \"message_timeout_secs\": {d},\n", .{self.agent.message_timeout_secs});
+        try w.print("    \"skills_prompt_limits\": {{\n", .{});
+        try w.print("      \"max_skills_in_prompt\": {d},\n", .{self.agent.skills_prompt_limits.max_skills_in_prompt});
+        try w.print("      \"max_skills_prompt_chars\": {d},\n", .{self.agent.skills_prompt_limits.max_skills_prompt_chars});
+        try w.print("      \"max_skill_file_bytes\": {d},\n", .{self.agent.skills_prompt_limits.max_skill_file_bytes});
+        try w.print("      \"max_candidates_per_root\": {d},\n", .{self.agent.skills_prompt_limits.max_candidates_per_root});
+        try w.print("      \"max_skills_loaded_per_source\": {d}\n", .{self.agent.skills_prompt_limits.max_skills_loaded_per_source});
+        try w.print("    }}\n", .{});
         try w.print("  }},\n", .{});
 
         // Memory
@@ -745,10 +767,35 @@ test "json parse scheduler section" {
     try std.testing.expectEqual(@as(u32, 8), cfg.scheduler.max_concurrent);
 }
 
+test "json parse reliability cooldown and model fallback section" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"reliability":{"provider_retries":3,"provider_backoff_ms":750,"model_fallback_cooldown_secs":90,"model_probe_interval_secs":15,"probe_primary_during_cooldown":false,"model_fallbacks":[{"model":"gpt-4.1","fallbacks":["gpt-4.1-mini","gpt-4o-mini"]}]}}
+    ;
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = allocator,
+        .arena = std.heap.ArenaAllocator.init(allocator),
+    };
+    defer cfg.deinit();
+    try cfg.parseJson(json);
+
+    try std.testing.expectEqual(@as(u32, 3), cfg.reliability.provider_retries);
+    try std.testing.expectEqual(@as(u64, 750), cfg.reliability.provider_backoff_ms);
+    try std.testing.expectEqual(@as(u64, 90), cfg.reliability.model_fallback_cooldown_secs);
+    try std.testing.expectEqual(@as(u64, 15), cfg.reliability.model_probe_interval_secs);
+    try std.testing.expect(!cfg.reliability.probe_primary_during_cooldown);
+    try std.testing.expectEqual(@as(usize, 1), cfg.reliability.model_fallbacks.len);
+    try std.testing.expectEqualStrings("gpt-4.1", cfg.reliability.model_fallbacks[0].model);
+    try std.testing.expectEqual(@as(usize, 2), cfg.reliability.model_fallbacks[0].fallbacks.len);
+    try std.testing.expectEqualStrings("gpt-4.1-mini", cfg.reliability.model_fallbacks[0].fallbacks[0]);
+}
+
 test "json parse agent section" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml"}}
+        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml", "skills_prompt_limits": {"max_skills_in_prompt": 9, "max_skills_prompt_chars": 12345, "max_skill_file_bytes": 8192, "max_candidates_per_root": 21, "max_skills_loaded_per_source": 7}}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -757,6 +804,11 @@ test "json parse agent section" {
     try std.testing.expectEqual(@as(u32, 80), cfg.agent.max_history_messages);
     try std.testing.expect(cfg.agent.parallel_tools);
     try std.testing.expectEqualStrings("xml", cfg.agent.tool_dispatcher);
+    try std.testing.expectEqual(@as(u32, 9), cfg.agent.skills_prompt_limits.max_skills_in_prompt);
+    try std.testing.expectEqual(@as(u32, 12345), cfg.agent.skills_prompt_limits.max_skills_prompt_chars);
+    try std.testing.expectEqual(@as(u32, 8192), cfg.agent.skills_prompt_limits.max_skill_file_bytes);
+    try std.testing.expectEqual(@as(u32, 21), cfg.agent.skills_prompt_limits.max_candidates_per_root);
+    try std.testing.expectEqual(@as(u32, 7), cfg.agent.skills_prompt_limits.max_skills_loaded_per_source);
     allocator.free(cfg.agent.tool_dispatcher);
 }
 
@@ -838,6 +890,40 @@ test "json parse browser section" {
     try std.testing.expectEqualStrings("auto", cfg.browser.backend);
     try std.testing.expect(!cfg.browser.native_headless);
     allocator.free(cfg.browser.backend);
+}
+
+test "save writes agent skills prompt limits" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fs.path.join(allocator, &.{ base, "config.json" });
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.agent.skills_prompt_limits.max_skills_in_prompt = 11;
+    cfg.agent.skills_prompt_limits.max_skills_prompt_chars = 22_222;
+    cfg.agent.skills_prompt_limits.max_skill_file_bytes = 4096;
+    cfg.agent.skills_prompt_limits.max_candidates_per_root = 33;
+    cfg.agent.skills_prompt_limits.max_skills_loaded_per_source = 8;
+
+    try cfg.save();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 128 * 1024);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"agent\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"skills_prompt_limits\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skills_in_prompt\": 11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skills_prompt_chars\": 22222") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skill_file_bytes\": 4096") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_candidates_per_root\": 33") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skills_loaded_per_source\": 8") != null);
 }
 
 test "json parse empty object uses defaults" {

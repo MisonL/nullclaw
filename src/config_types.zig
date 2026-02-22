@@ -90,6 +90,9 @@ pub const ModelFallbackEntry = struct {
 pub const ReliabilityConfig = struct {
     provider_retries: u32 = 2,
     provider_backoff_ms: u64 = 500,
+    model_fallback_cooldown_secs: u64 = 120,
+    model_probe_interval_secs: u64 = 30,
+    probe_primary_during_cooldown: bool = true,
     channel_initial_backoff_secs: u64 = 2,
     channel_max_backoff_secs: u64 = 60,
     scheduler_poll_secs: u64 = 15,
@@ -105,6 +108,14 @@ pub const SchedulerConfig = struct {
     max_concurrent: u32 = 4,
 };
 
+pub const SkillsPromptLimits = struct {
+    max_skills_in_prompt: u32 = 24,
+    max_skills_prompt_chars: u32 = 32_000,
+    max_skill_file_bytes: u32 = 65_536,
+    max_candidates_per_root: u32 = 64,
+    max_skills_loaded_per_source: u32 = 32,
+};
+
 pub const AgentConfig = struct {
     compact_context: bool = false,
     max_tool_iterations: u32 = 10,
@@ -118,6 +129,7 @@ pub const AgentConfig = struct {
     compaction_max_source_chars: u32 = 12_000,
     /// Max seconds to wait for an LLM HTTP response (curl --max-time). 0 = no limit.
     message_timeout_secs: u64 = 300,
+    skills_prompt_limits: SkillsPromptLimits = .{},
 };
 
 pub const ToolsConfig = struct {

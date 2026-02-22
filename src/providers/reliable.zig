@@ -1,9 +1,12 @@
 const std = @import("std");
 const root = @import("root.zig");
+const config_types = @import("../config_types.zig");
 
 const Provider = root.Provider;
 const ChatRequest = root.ChatRequest;
 const ChatResponse = root.ChatResponse;
+const StreamCallback = root.StreamCallback;
+const StreamChatResult = root.StreamChatResult;
 
 /// Check if an error message indicates a non-retryable client error (4xx except 429/408).
 pub fn isNonRetryable(err_msg: []const u8) bool {
@@ -55,6 +58,30 @@ pub fn isRateLimited(err_msg: []const u8) bool {
         (std.mem.indexOf(u8, err_msg, "Too Many") != null or
             std.mem.indexOf(u8, err_msg, "rate") != null or
             std.mem.indexOf(u8, err_msg, "limit") != null);
+}
+
+/// Check if an error message indicates a 5xx server error.
+pub fn isServerError(err_msg: []const u8) bool {
+    var i: usize = 0;
+    while (i < err_msg.len) {
+        if (std.ascii.isDigit(err_msg[i])) {
+            var end = i;
+            while (end < err_msg.len and std.ascii.isDigit(err_msg[end])) {
+                end += 1;
+            }
+            if (end - i == 3) {
+                const code = std.fmt.parseInt(u16, err_msg[i..end], 10) catch {
+                    i = end;
+                    continue;
+                };
+                if (code >= 500 and code < 600) return true;
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    return false;
 }
 
 /// Try to extract a Retry-After value (in milliseconds) from an error message.
@@ -121,10 +148,7 @@ pub const ProviderEntry = struct {
 };
 
 /// A model fallback mapping: when `model` fails, try `fallbacks` in order.
-pub const ModelFallbackEntry = struct {
-    model: []const u8,
-    fallbacks: []const []const u8,
-};
+pub const ModelFallbackEntry = config_types.ModelFallbackEntry;
 
 /// Provider wrapper with retry, multi-provider fallback, and model failover.
 ///
@@ -133,6 +157,9 @@ pub const ModelFallbackEntry = struct {
 /// non-retryable client errors (4xx except 429/408). On rate-limit errors,
 /// rotates API keys if available. Supports per-model fallback chains.
 pub const ReliableProvider = struct {
+    const DEFAULT_MODEL_FALLBACK_COOLDOWN_MS: u64 = 120_000;
+    const DEFAULT_MODEL_PROBE_INTERVAL_MS: u64 = 30_000;
+
     /// The wrapped primary inner provider to delegate calls to.
     inner: Provider,
     /// Additional fallback providers (empty by default for backward compat).
@@ -149,6 +176,17 @@ pub const ReliableProvider = struct {
     /// Last error message from failed attempt (for retry-after parsing).
     last_error_msg: [256]u8,
     last_error_len: usize,
+    /// Cooldown window for model-level fallback activation.
+    model_fallback_cooldown_ms: u64 = DEFAULT_MODEL_FALLBACK_COOLDOWN_MS,
+    /// How often to probe the primary model while in cooldown.
+    model_probe_interval_ms: u64 = DEFAULT_MODEL_PROBE_INTERVAL_MS,
+    /// Whether primary probing is allowed before cooldown expires.
+    probe_primary_during_cooldown: bool = true,
+    /// Dynamic state for fallback/cooldown.
+    fallback_active: bool = false,
+    fallback_primary_model_hash: u64 = 0,
+    fallback_cooldown_until_ms: i64 = 0,
+    fallback_last_probe_ms: i64 = 0,
 
     pub fn init(
         provider_names: []const []const u8,
@@ -187,6 +225,19 @@ pub const ReliableProvider = struct {
 
     pub fn withApiKeys(self: *ReliableProvider, keys: []const []const u8) *ReliableProvider {
         self.api_keys = keys;
+        return self;
+    }
+
+    /// Configure model fallback cooldown and probing policy.
+    pub fn withProbePolicy(
+        self: *ReliableProvider,
+        model_fallback_cooldown_ms: u64,
+        model_probe_interval_ms: u64,
+        probe_primary_during_cooldown: bool,
+    ) *ReliableProvider {
+        self.model_fallback_cooldown_ms = model_fallback_cooldown_ms;
+        self.model_probe_interval_ms = model_probe_interval_ms;
+        self.probe_primary_during_cooldown = probe_primary_during_cooldown;
         return self;
     }
 
@@ -262,6 +313,58 @@ pub const ReliableProvider = struct {
         return self.last_error_msg[0..self.last_error_len];
     }
 
+    fn modelHash(model: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, model);
+    }
+
+    fn toI64Saturating(value: u64) i64 {
+        if (value > std.math.maxInt(i64)) return std.math.maxInt(i64);
+        return @intCast(value);
+    }
+
+    fn enterFallback(self: *ReliableProvider, primary_model: []const u8) void {
+        const now_ms = std.time.milliTimestamp();
+        const cooldown_ms = toI64Saturating(self.model_fallback_cooldown_ms);
+        self.fallback_active = true;
+        self.fallback_primary_model_hash = modelHash(primary_model);
+        self.fallback_last_probe_ms = now_ms;
+        self.fallback_cooldown_until_ms = now_ms +| cooldown_ms;
+    }
+
+    fn clearFallback(self: *ReliableProvider) void {
+        self.fallback_active = false;
+        self.fallback_primary_model_hash = 0;
+        self.fallback_last_probe_ms = 0;
+        self.fallback_cooldown_until_ms = 0;
+    }
+
+    fn shouldTryPrimaryNow(self: *ReliableProvider, primary_model: []const u8) bool {
+        if (!self.fallback_active) return true;
+
+        const primary_hash = modelHash(primary_model);
+        if (self.fallback_primary_model_hash != primary_hash) {
+            // Model switched; stale fallback state should not block new primary model.
+            self.clearFallback();
+            return true;
+        }
+
+        const now_ms = std.time.milliTimestamp();
+        if (now_ms >= self.fallback_cooldown_until_ms) return true;
+
+        if (!self.probe_primary_during_cooldown) return false;
+        if (self.model_probe_interval_ms == 0) return true;
+
+        if (self.fallback_last_probe_ms <= 0) return true;
+        const interval_ms = toI64Saturating(self.model_probe_interval_ms);
+        return (now_ms - self.fallback_last_probe_ms) >= interval_ms;
+    }
+
+    fn markPrimaryProbe(self: *ReliableProvider, primary_model: []const u8) void {
+        if (self.fallback_active and self.fallback_primary_model_hash == modelHash(primary_model)) {
+            self.fallback_last_probe_ms = std.time.milliTimestamp();
+        }
+    }
+
     // ── Provider vtable implementation ──
 
     const vtable_impl = Provider.VTable{
@@ -271,6 +374,8 @@ pub const ReliableProvider = struct {
         .getName = getNameImpl,
         .deinit = deinitImpl,
         .warmup = warmupImpl,
+        .supports_streaming = supportsStreamingImpl,
+        .stream_chat = streamChatImpl,
     };
 
     /// Create a Provider interface from this ReliableProvider.
@@ -348,6 +453,119 @@ pub const ReliableProvider = struct {
         return null;
     }
 
+    /// Try a single provider for stream chat.
+    /// No retries here: retrying after partial stream can duplicate output.
+    fn tryStreamChatProvider(
+        self: *ReliableProvider,
+        prov: Provider,
+        allocator: std.mem.Allocator,
+        request: ChatRequest,
+        current_model: []const u8,
+        callback: StreamCallback,
+        callback_ctx: *anyopaque,
+    ) ?StreamChatResult {
+        if (prov.streamChat(allocator, request, current_model, request.temperature, callback, callback_ctx)) |result| {
+            return result;
+        } else |err| {
+            self.storeErrorName(err);
+            const err_slice = self.lastErrorSlice();
+            if (isRateLimited(err_slice)) {
+                _ = self.rotateKey();
+            }
+            return null;
+        }
+    }
+
+    fn tryChatWithSystemAcrossProviders(
+        self: *ReliableProvider,
+        allocator: std.mem.Allocator,
+        system_prompt: ?[]const u8,
+        message: []const u8,
+        current_model: []const u8,
+    ) ?[]const u8 {
+        if (self.tryChatWithSystemProvider(
+            self.inner,
+            allocator,
+            system_prompt,
+            message,
+            current_model,
+        )) |result| {
+            return result;
+        }
+        for (self.extras) |entry| {
+            if (self.tryChatWithSystemProvider(
+                entry.provider,
+                allocator,
+                system_prompt,
+                message,
+                current_model,
+            )) |result| {
+                return result;
+            }
+        }
+        return null;
+    }
+
+    fn tryChatAcrossProviders(
+        self: *ReliableProvider,
+        allocator: std.mem.Allocator,
+        request: ChatRequest,
+        current_model: []const u8,
+    ) ?ChatResponse {
+        if (self.tryChatProvider(
+            self.inner,
+            allocator,
+            request,
+            current_model,
+        )) |result| {
+            return result;
+        }
+        for (self.extras) |entry| {
+            if (self.tryChatProvider(
+                entry.provider,
+                allocator,
+                request,
+                current_model,
+            )) |result| {
+                return result;
+            }
+        }
+        return null;
+    }
+
+    fn tryStreamAcrossProviders(
+        self: *ReliableProvider,
+        allocator: std.mem.Allocator,
+        request: ChatRequest,
+        current_model: []const u8,
+        callback: StreamCallback,
+        callback_ctx: *anyopaque,
+    ) ?StreamChatResult {
+        if (self.tryStreamChatProvider(
+            self.inner,
+            allocator,
+            request,
+            current_model,
+            callback,
+            callback_ctx,
+        )) |result| {
+            return result;
+        }
+        for (self.extras) |entry| {
+            if (self.tryStreamChatProvider(
+                entry.provider,
+                allocator,
+                request,
+                current_model,
+                callback,
+                callback_ctx,
+            )) |result| {
+                return result;
+            }
+        }
+        return null;
+    }
+
     fn chatWithSystemImpl(
         ptr: *anyopaque,
         allocator: std.mem.Allocator,
@@ -362,29 +580,47 @@ pub const ReliableProvider = struct {
         const models = try self.modelChain(allocator, model);
         defer allocator.free(models);
 
-        for (models) |current_model| {
-            // Try primary provider
-            if (self.tryChatWithSystemProvider(
-                self.inner,
+        if (models.len == 0) return error.AllProvidersFailed;
+
+        const primary_model = models[0];
+        const attempt_primary = self.shouldTryPrimaryNow(primary_model);
+        if (attempt_primary) {
+            self.markPrimaryProbe(primary_model);
+            if (self.tryChatWithSystemAcrossProviders(
                 allocator,
                 system_prompt,
                 message,
-                current_model,
+                primary_model,
             )) |result| {
+                self.clearFallback();
                 return result;
             }
+            if (models.len > 1) self.enterFallback(primary_model);
+        }
 
-            // Try extra providers
-            for (self.extras) |entry| {
-                if (self.tryChatWithSystemProvider(
-                    entry.provider,
+        if (models.len > 1) {
+            for (models[1..]) |fallback_model| {
+                if (self.tryChatWithSystemAcrossProviders(
                     allocator,
                     system_prompt,
                     message,
-                    current_model,
+                    fallback_model,
                 )) |result| {
                     return result;
                 }
+            }
+        }
+
+        // If primary was skipped due cooldown and all fallbacks failed, try primary once.
+        if (!attempt_primary) {
+            if (self.tryChatWithSystemAcrossProviders(
+                allocator,
+                system_prompt,
+                message,
+                primary_model,
+            )) |result| {
+                self.clearFallback();
+                return result;
             }
         }
 
@@ -404,27 +640,108 @@ pub const ReliableProvider = struct {
         const models = try self.modelChain(allocator, model);
         defer allocator.free(models);
 
-        for (models) |current_model| {
-            // Try primary provider
-            if (self.tryChatProvider(
-                self.inner,
+        if (models.len == 0) return error.AllProvidersFailed;
+
+        const primary_model = models[0];
+        const attempt_primary = self.shouldTryPrimaryNow(primary_model);
+        if (attempt_primary) {
+            self.markPrimaryProbe(primary_model);
+            if (self.tryChatAcrossProviders(
                 allocator,
                 request,
-                current_model,
+                primary_model,
             )) |result| {
+                self.clearFallback();
                 return result;
             }
+            if (models.len > 1) self.enterFallback(primary_model);
+        }
 
-            // Try extra providers
-            for (self.extras) |entry| {
-                if (self.tryChatProvider(
-                    entry.provider,
+        if (models.len > 1) {
+            for (models[1..]) |fallback_model| {
+                if (self.tryChatAcrossProviders(
                     allocator,
                     request,
-                    current_model,
+                    fallback_model,
                 )) |result| {
                     return result;
                 }
+            }
+        }
+
+        // If primary was skipped due cooldown and all fallbacks failed, try primary once.
+        if (!attempt_primary) {
+            if (self.tryChatAcrossProviders(
+                allocator,
+                request,
+                primary_model,
+            )) |result| {
+                self.clearFallback();
+                return result;
+            }
+        }
+
+        return error.AllProvidersFailed;
+    }
+
+    fn streamChatImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        request: ChatRequest,
+        model: []const u8,
+        temperature: f64,
+        callback: StreamCallback,
+        callback_ctx: *anyopaque,
+    ) anyerror!StreamChatResult {
+        const self: *ReliableProvider = @ptrCast(@alignCast(ptr));
+        _ = temperature;
+
+        const models = try self.modelChain(allocator, model);
+        defer allocator.free(models);
+        if (models.len == 0) return error.AllProvidersFailed;
+
+        const primary_model = models[0];
+        const attempt_primary = self.shouldTryPrimaryNow(primary_model);
+        if (attempt_primary) {
+            self.markPrimaryProbe(primary_model);
+            if (self.tryStreamAcrossProviders(
+                allocator,
+                request,
+                primary_model,
+                callback,
+                callback_ctx,
+            )) |result| {
+                self.clearFallback();
+                return result;
+            }
+            if (models.len > 1) self.enterFallback(primary_model);
+        }
+
+        if (models.len > 1) {
+            for (models[1..]) |fallback_model| {
+                if (self.tryStreamAcrossProviders(
+                    allocator,
+                    request,
+                    fallback_model,
+                    callback,
+                    callback_ctx,
+                )) |result| {
+                    return result;
+                }
+            }
+        }
+
+        // If primary was skipped due cooldown and all fallbacks failed, try primary once.
+        if (!attempt_primary) {
+            if (self.tryStreamAcrossProviders(
+                allocator,
+                request,
+                primary_model,
+                callback,
+                callback_ctx,
+            )) |result| {
+                self.clearFallback();
+                return result;
             }
         }
 
@@ -443,6 +760,15 @@ pub const ReliableProvider = struct {
     fn getNameImpl(ptr: *anyopaque) []const u8 {
         const self: *ReliableProvider = @ptrCast(@alignCast(ptr));
         return self.inner.getName();
+    }
+
+    fn supportsStreamingImpl(ptr: *anyopaque) bool {
+        const self: *ReliableProvider = @ptrCast(@alignCast(ptr));
+        if (self.inner.supportsStreaming()) return true;
+        for (self.extras) |entry| {
+            if (entry.provider.supportsStreaming()) return true;
+        }
+        return false;
     }
 
     fn deinitImpl(ptr: *anyopaque) void {
@@ -760,6 +1086,175 @@ const ModelAwareMock = struct {
     fn modelDeinit(_: *anyopaque) void {}
 };
 
+/// Mock with a primary model that fails N times, then recovers.
+const RecoveringModelMock = struct {
+    primary_model: []const u8,
+    fallback_model: []const u8,
+    primary_failures_remaining: u32,
+    primary_response: []const u8,
+    fallback_response: []const u8,
+    models_seen_buf: [16][]const u8 = undefined,
+    models_seen_len: usize = 0,
+
+    const vtable_recovering = Provider.VTable{
+        .chatWithSystem = chatWithSystemImpl,
+        .chat = chatImpl,
+        .supportsNativeTools = supportsNativeToolsImpl,
+        .getName = getNameImpl,
+        .deinit = deinitImpl,
+    };
+
+    fn toProvider(self: *RecoveringModelMock) Provider {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable_recovering };
+    }
+
+    fn recordModel(self: *RecoveringModelMock, model: []const u8) void {
+        if (self.models_seen_len < self.models_seen_buf.len) {
+            self.models_seen_buf[self.models_seen_len] = model;
+            self.models_seen_len += 1;
+        }
+    }
+
+    fn resetSeen(self: *RecoveringModelMock) void {
+        self.models_seen_len = 0;
+    }
+
+    fn modelsSeen(self: *const RecoveringModelMock) []const []const u8 {
+        return self.models_seen_buf[0..self.models_seen_len];
+    }
+
+    fn selectResponse(self: *RecoveringModelMock, model: []const u8) anyerror![]const u8 {
+        self.recordModel(model);
+
+        if (std.mem.eql(u8, model, self.primary_model)) {
+            if (self.primary_failures_remaining > 0) {
+                self.primary_failures_remaining -= 1;
+                return error.ProviderError;
+            }
+            return self.primary_response;
+        }
+
+        if (std.mem.eql(u8, model, self.fallback_model)) {
+            return self.fallback_response;
+        }
+
+        return error.ModelUnavailable;
+    }
+
+    fn chatWithSystemImpl(
+        ptr: *anyopaque,
+        _: std.mem.Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        model: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        const self: *RecoveringModelMock = @ptrCast(@alignCast(ptr));
+        return self.selectResponse(model);
+    }
+
+    fn chatImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ChatRequest,
+        model: []const u8,
+        _: f64,
+    ) anyerror!ChatResponse {
+        const self: *RecoveringModelMock = @ptrCast(@alignCast(ptr));
+        const text = try self.selectResponse(model);
+        return .{ .content = try allocator.dupe(u8, text) };
+    }
+
+    fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn getNameImpl(_: *anyopaque) []const u8 {
+        return "RecoveringModelMock";
+    }
+
+    fn deinitImpl(_: *anyopaque) void {}
+};
+
+/// Streaming-capable mock for verifying stream delegation through ReliableProvider.
+const StreamingMock = struct {
+    stream_calls: u32 = 0,
+    chat_calls: u32 = 0,
+
+    const vtable_streaming = Provider.VTable{
+        .chatWithSystem = chatWithSystemImpl,
+        .chat = chatImpl,
+        .supportsNativeTools = supportsNativeToolsImpl,
+        .getName = getNameImpl,
+        .deinit = deinitImpl,
+        .supports_streaming = supportsStreamingImpl,
+        .stream_chat = streamChatImpl,
+    };
+
+    fn toProvider(self: *StreamingMock) Provider {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable_streaming };
+    }
+
+    fn chatWithSystemImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        _: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        const self: *StreamingMock = @ptrCast(@alignCast(ptr));
+        self.chat_calls += 1;
+        return try allocator.dupe(u8, "streaming-mock");
+    }
+
+    fn chatImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ChatRequest,
+        _: []const u8,
+        _: f64,
+    ) anyerror!ChatResponse {
+        const self: *StreamingMock = @ptrCast(@alignCast(ptr));
+        self.chat_calls += 1;
+        return .{ .content = try allocator.dupe(u8, "streaming-mock-chat") };
+    }
+
+    fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn getNameImpl(_: *anyopaque) []const u8 {
+        return "StreamingMock";
+    }
+
+    fn deinitImpl(_: *anyopaque) void {}
+
+    fn supportsStreamingImpl(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn streamChatImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ChatRequest,
+        _: []const u8,
+        _: f64,
+        callback: StreamCallback,
+        callback_ctx: *anyopaque,
+    ) anyerror!StreamChatResult {
+        const self: *StreamingMock = @ptrCast(@alignCast(ptr));
+        self.stream_calls += 1;
+        callback(callback_ctx, root.StreamChunk.textDelta("S"));
+        callback(callback_ctx, root.StreamChunk.textDelta("T"));
+        callback(callback_ctx, root.StreamChunk.finalChunk());
+        return .{
+            .content = try allocator.dupe(u8, "ST"),
+            .model = "stream-model",
+        };
+    }
+};
+
 test "ReliableProvider vtable succeeds without retry" {
     var mock = MockInnerProvider{ .call_count = 0, .fail_until = 0, .supports_tools = true };
     var reliable = ReliableProvider.initWithProvider(mock.toProvider(), 3, 50);
@@ -988,4 +1483,104 @@ test "multi-provider chat fallback" {
     try std.testing.expectEqualStrings("mock chat", result.content.?);
     try std.testing.expect(primary.call_count == 1);
     try std.testing.expect(fallback.call_count == 1);
+}
+
+test "model cooldown skips primary when probing disabled" {
+    var mock = RecoveringModelMock{
+        .primary_model = "primary",
+        .fallback_model = "fallback",
+        .primary_failures_remaining = 1,
+        .primary_response = "primary-ok",
+        .fallback_response = "fallback-ok",
+    };
+    const fb = [_]ModelFallbackEntry{
+        .{ .model = "primary", .fallbacks = &.{"fallback"} },
+    };
+    var reliable = ReliableProvider.initWithProvider(mock.toProvider(), 0, 50).withModelFallbacks(&fb);
+    _ = reliable.withProbePolicy(120_000, 60_000, false);
+    const prov = reliable.provider();
+
+    const first = try prov.chatWithSystem(std.testing.allocator, null, "hello", "primary", 0.7);
+    try std.testing.expectEqualStrings("fallback-ok", first);
+    const seen_first = mock.modelsSeen();
+    try std.testing.expectEqual(@as(usize, 2), seen_first.len);
+    try std.testing.expectEqualStrings("primary", seen_first[0]);
+    try std.testing.expectEqualStrings("fallback", seen_first[1]);
+
+    mock.resetSeen();
+    const second = try prov.chatWithSystem(std.testing.allocator, null, "hello", "primary", 0.7);
+    try std.testing.expectEqualStrings("fallback-ok", second);
+    const seen_second = mock.modelsSeen();
+    try std.testing.expectEqual(@as(usize, 1), seen_second.len);
+    try std.testing.expectEqualStrings("fallback", seen_second[0]);
+}
+
+test "model probing during cooldown recovers primary" {
+    var mock = RecoveringModelMock{
+        .primary_model = "primary",
+        .fallback_model = "fallback",
+        .primary_failures_remaining = 1,
+        .primary_response = "primary-ok",
+        .fallback_response = "fallback-ok",
+    };
+    const fb = [_]ModelFallbackEntry{
+        .{ .model = "primary", .fallbacks = &.{"fallback"} },
+    };
+    var reliable = ReliableProvider.initWithProvider(mock.toProvider(), 0, 50).withModelFallbacks(&fb);
+    // probe interval = 0 => probe primary every turn while in cooldown
+    _ = reliable.withProbePolicy(120_000, 0, true);
+    const prov = reliable.provider();
+
+    const first = try prov.chatWithSystem(std.testing.allocator, null, "hello", "primary", 0.7);
+    try std.testing.expectEqualStrings("fallback-ok", first);
+
+    mock.resetSeen();
+    const second = try prov.chatWithSystem(std.testing.allocator, null, "hello", "primary", 0.7);
+    try std.testing.expectEqualStrings("primary-ok", second);
+    const seen_second = mock.modelsSeen();
+    try std.testing.expectEqual(@as(usize, 1), seen_second.len);
+    try std.testing.expectEqualStrings("primary", seen_second[0]);
+    try std.testing.expect(!reliable.fallback_active);
+}
+
+test "reliable provider preserves streaming capability" {
+    const Capture = struct {
+        const Self = @This();
+        text: [16]u8 = undefined,
+        len: usize = 0,
+        finals: usize = 0,
+
+        fn onChunk(ctx: *anyopaque, chunk: root.StreamChunk) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            if (chunk.is_final) {
+                self.finals += 1;
+                return;
+            }
+            if (self.len + chunk.delta.len > self.text.len) return;
+            @memcpy(self.text[self.len .. self.len + chunk.delta.len], chunk.delta);
+            self.len += chunk.delta.len;
+        }
+    };
+
+    var mock = StreamingMock{};
+    var reliable = ReliableProvider.initWithProvider(mock.toProvider(), 0, 50);
+    const prov = reliable.provider();
+    try std.testing.expect(prov.supportsStreaming());
+
+    var capture = Capture{};
+    const msgs = [_]root.ChatMessage{root.ChatMessage.user("hello")};
+    const req = ChatRequest{ .messages = &msgs };
+    const stream_result = try prov.streamChat(
+        std.testing.allocator,
+        req,
+        "stream-model",
+        0.7,
+        Capture.onChunk,
+        @ptrCast(&capture),
+    );
+    defer if (stream_result.content) |c| std.testing.allocator.free(c);
+
+    try std.testing.expectEqual(@as(u32, 1), mock.stream_calls);
+    try std.testing.expectEqual(@as(usize, 1), capture.finals);
+    try std.testing.expectEqualStrings("ST", capture.text[0..capture.len]);
 }

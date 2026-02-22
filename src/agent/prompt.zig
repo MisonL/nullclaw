@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const tools_mod = @import("../tools/root.zig");
 const Tool = tools_mod.Tool;
 const skills_mod = @import("../skills.zig");
+const config_types = @import("../config_types.zig");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // System Prompt Builder
@@ -16,6 +17,7 @@ pub const PromptContext = struct {
     workspace_dir: []const u8,
     model_name: []const u8,
     tools: []const Tool,
+    skills_prompt_limits: config_types.SkillsPromptLimits = .{},
 };
 
 /// Build the full system prompt from workspace identity files, tools, and runtime context.
@@ -42,7 +44,7 @@ pub fn buildSystemPrompt(
     try w.writeAll("- When in doubt, ask before acting externally.\n\n");
 
     // Skills section
-    try appendSkillsSection(allocator, w, ctx.workspace_dir);
+    try appendSkillsSection(allocator, w, ctx.workspace_dir, ctx.skills_prompt_limits);
 
     // Workspace section
     try std.fmt.format(w, "## Workspace\n\nWorking directory: `{s}`\n\n", .{ctx.workspace_dir});
@@ -119,8 +121,92 @@ fn appendSkillsSection(
     allocator: std.mem.Allocator,
     w: anytype,
     workspace_dir: []const u8,
+    limits: config_types.SkillsPromptLimits,
 ) !void {
-    // Two-source loading: workspace skills + ~/.nullclaw/skills/community/
+    const SkillSource = enum { workspace, community, other };
+
+    const max_skills_in_prompt: usize = if (limits.max_skills_in_prompt == 0)
+        std.math.maxInt(usize)
+    else
+        @intCast(limits.max_skills_in_prompt);
+    const max_skills_prompt_chars: usize = if (limits.max_skills_prompt_chars == 0)
+        std.math.maxInt(usize)
+    else
+        @intCast(limits.max_skills_prompt_chars);
+    const max_skill_file_bytes: usize = if (limits.max_skill_file_bytes == 0)
+        std.math.maxInt(usize)
+    else
+        @intCast(limits.max_skill_file_bytes);
+    const max_candidates_per_root: usize = if (limits.max_candidates_per_root == 0)
+        std.math.maxInt(usize)
+    else
+        @intCast(limits.max_candidates_per_root);
+    const max_skills_loaded_per_source: usize = if (limits.max_skills_loaded_per_source == 0)
+        std.math.maxInt(usize)
+    else
+        @intCast(limits.max_skills_loaded_per_source);
+
+    const normalizePathChar = struct {
+        fn run(c: u8) u8 {
+            const slash = if (c == '\\') '/' else c;
+            return if (builtin.os.tag == .windows) std.ascii.toLower(slash) else slash;
+        }
+    }.run;
+
+    const trimPathSeps = struct {
+        fn run(path: []const u8) []const u8 {
+            return std.mem.trimRight(u8, path, "/\\");
+        }
+    }.run;
+
+    const pathHasPrefix = struct {
+        fn run(path_in: []const u8, prefix_in: []const u8, normalize: fn (u8) u8) bool {
+            const path = trimPathSeps(path_in);
+            const prefix = trimPathSeps(prefix_in);
+            if (prefix.len == 0) return false;
+            if (path.len < prefix.len) return false;
+            for (prefix, 0..) |pc, i| {
+                if (normalize(path[i]) != normalize(pc)) return false;
+            }
+            if (path.len == prefix.len) return true;
+            return normalize(path[prefix.len]) == '/';
+        }
+    }.run;
+
+    const detectSource = struct {
+        fn run(skill: *const skills_mod.Skill, workspace: []const u8, community: ?[]const u8, normalize: fn (u8) u8) SkillSource {
+            if (pathHasPrefix(skill.path, workspace, normalize)) return .workspace;
+            if (community) |base| {
+                if (pathHasPrefix(skill.path, base, normalize)) return .community;
+            }
+            return .other;
+        }
+    }.run;
+
+    const writeWithinBudget = struct {
+        fn run(writer: anytype, text: []const u8, used_chars: *usize, max_chars: usize, truncated_chars: *bool) !bool {
+            if (text.len == 0) return true;
+            if (used_chars.* >= max_chars or text.len > (max_chars - used_chars.*)) {
+                truncated_chars.* = true;
+                return false;
+            }
+            try writer.writeAll(text);
+            used_chars.* += text.len;
+            return true;
+        }
+    }.run;
+
+    const sourceCounter = struct {
+        fn get(source: SkillSource, workspace_count: *usize, community_count: *usize, other_count: *usize) *usize {
+            return switch (source) {
+                .workspace => workspace_count,
+                .community => community_count,
+                .other => other_count,
+            };
+        }
+    }.get;
+
+    // Two-source loading: workspace skills + ~/.nullclaw/skills/
     const home_dir: ?[]u8 = if (std.process.getEnvVarOwned(allocator, "HOME")) |h|
         h
     else |_| if (std.process.getEnvVarOwned(allocator, "USERPROFILE")) |h|
@@ -154,53 +240,209 @@ fn appendSkillsSection(
 
     if (skill_list.len == 0) return;
 
-    // Render always=true skills with full instructions first
+    std.mem.sort(skills_mod.Skill, @constCast(skill_list), {}, struct {
+        fn lessThan(_: void, a: skills_mod.Skill, b: skills_mod.Skill) bool {
+            return std.mem.order(u8, a.name, b.name) == .lt;
+        }
+    }.lessThan);
+
+    var candidates: std.ArrayListUnmanaged(*skills_mod.Skill) = .empty;
+    defer candidates.deinit(allocator);
+    var workspace_candidates: usize = 0;
+    var community_candidates: usize = 0;
+    var other_candidates: usize = 0;
+    var truncated_candidates = false;
+
+    for (skill_list) |*skill| {
+        const source = detectSource(skill, workspace_dir, community_base, normalizePathChar);
+        const source_candidate_count = sourceCounter(source, &workspace_candidates, &community_candidates, &other_candidates);
+        if (source_candidate_count.* >= max_candidates_per_root) {
+            truncated_candidates = true;
+            continue;
+        }
+        source_candidate_count.* += 1;
+        try candidates.append(allocator, skill);
+    }
+
+    if (candidates.items.len == 0) return;
+
+    var used_chars: usize = 0;
+    var used_skills: usize = 0;
+    var workspace_loaded: usize = 0;
+    var community_loaded: usize = 0;
+    var other_loaded: usize = 0;
+
     var has_always = false;
-    for (skill_list) |skill| {
-        if (!skill.always or !skill.available) continue;
-        if (!has_always) {
-            try w.writeAll("## Skills\n\n");
-            has_always = true;
+    var has_summary = false;
+    var truncated_by_count = false;
+    var truncated_by_chars = false;
+    var truncated_by_file_size = false;
+    var truncated_by_source_limit = false;
+
+    const renderSkill = struct {
+        fn run(
+            allocator_i: std.mem.Allocator,
+            writer: anytype,
+            skill: *const skills_mod.Skill,
+            source: SkillSource,
+            used_chars_i: *usize,
+            used_skills_i: *usize,
+            max_skills_i: usize,
+            max_chars_i: usize,
+            max_file_bytes_i: usize,
+            max_per_source_i: usize,
+            workspace_loaded_i: *usize,
+            community_loaded_i: *usize,
+            other_loaded_i: *usize,
+            has_always_i: *bool,
+            has_summary_i: *bool,
+            truncated_count_i: *bool,
+            truncated_chars_i: *bool,
+            truncated_file_i: *bool,
+            truncated_source_i: *bool,
+        ) !void {
+            if (used_skills_i.* >= max_skills_i) {
+                truncated_count_i.* = true;
+                return;
+            }
+
+            const loaded_counter = sourceCounter(source, workspace_loaded_i, community_loaded_i, other_loaded_i);
+            if (loaded_counter.* >= max_per_source_i) {
+                truncated_source_i.* = true;
+                return;
+            }
+
+            var entry_buf: std.ArrayListUnmanaged(u8) = .empty;
+            defer entry_buf.deinit(allocator_i);
+            const entry_w = entry_buf.writer(allocator_i);
+
+            if (skill.always and skill.available) {
+                if (!has_always_i.*) {
+                    if (!try writeWithinBudget(writer, "## Skills\n\n", used_chars_i, max_chars_i, truncated_chars_i)) return;
+                    has_always_i.* = true;
+                }
+                try std.fmt.format(entry_w, "### Skill: {s}\n\n", .{skill.name});
+                if (skill.description.len > 0) {
+                    try std.fmt.format(entry_w, "{s}\n\n", .{skill.description});
+                }
+                if (skill.instructions.len > 0) {
+                    const instructions = if (skill.instructions.len > max_file_bytes_i)
+                        skill.instructions[0..max_file_bytes_i]
+                    else
+                        skill.instructions;
+                    try entry_w.writeAll(instructions);
+                    try entry_w.writeAll("\n");
+                    if (skill.instructions.len > max_file_bytes_i) {
+                        try std.fmt.format(entry_w, "\n[skill instructions truncated at {d} bytes]\n", .{max_file_bytes_i});
+                        truncated_file_i.* = true;
+                    }
+                    try entry_w.writeAll("\n");
+                }
+            } else {
+                if (!has_summary_i.*) {
+                    if (!try writeWithinBudget(writer, "## Available Skills\n\n", used_chars_i, max_chars_i, truncated_chars_i)) return;
+                    if (!try writeWithinBudget(writer, "Use the read_file tool to load full skill instructions when needed.\n\n", used_chars_i, max_chars_i, truncated_chars_i)) return;
+                    if (!try writeWithinBudget(writer, "<available_skills>\n", used_chars_i, max_chars_i, truncated_chars_i)) return;
+                    has_summary_i.* = true;
+                }
+                if (!skill.available) {
+                    try std.fmt.format(
+                        entry_w,
+                        "  <skill name=\"{s}\" description=\"{s}\" available=\"false\" missing=\"{s}\"/>\n",
+                        .{ skill.name, skill.description, skill.missing_deps },
+                    );
+                } else {
+                    const skill_path = if (skill.path.len > 0) skill.path else "";
+                    const skill_md_path = try std.fs.path.join(allocator_i, &.{ skill_path, "SKILL.md" });
+                    defer allocator_i.free(skill_md_path);
+                    try std.fmt.format(
+                        entry_w,
+                        "  <skill name=\"{s}\" description=\"{s}\" path=\"{s}\"/>\n",
+                        .{ skill.name, skill.description, skill_md_path },
+                    );
+                }
+            }
+
+            if (!try writeWithinBudget(writer, entry_buf.items, used_chars_i, max_chars_i, truncated_chars_i)) {
+                return;
+            }
+            loaded_counter.* += 1;
+            used_skills_i.* += 1;
         }
-        try std.fmt.format(w, "### Skill: {s}\n\n", .{skill.name});
-        if (skill.description.len > 0) {
-            try std.fmt.format(w, "{s}\n\n", .{skill.description});
-        }
-        if (skill.instructions.len > 0) {
-            try w.writeAll(skill.instructions);
-            try w.writeAll("\n\n");
+    }.run;
+
+    for (candidates.items) |skill| {
+        if (!(skill.always and skill.available)) continue;
+        const source = detectSource(skill, workspace_dir, community_base, normalizePathChar);
+        try renderSkill(
+            allocator,
+            w,
+            skill,
+            source,
+            &used_chars,
+            &used_skills,
+            max_skills_in_prompt,
+            max_skills_prompt_chars,
+            max_skill_file_bytes,
+            max_skills_loaded_per_source,
+            &workspace_loaded,
+            &community_loaded,
+            &other_loaded,
+            &has_always,
+            &has_summary,
+            &truncated_by_count,
+            &truncated_by_chars,
+            &truncated_by_file_size,
+            &truncated_by_source_limit,
+        );
+        if (truncated_by_count or truncated_by_chars) break;
+    }
+
+    if (!truncated_by_count and !truncated_by_chars) {
+        for (candidates.items) |skill| {
+            if (skill.always and skill.available) continue;
+            const source = detectSource(skill, workspace_dir, community_base, normalizePathChar);
+            try renderSkill(
+                allocator,
+                w,
+                skill,
+                source,
+                &used_chars,
+                &used_skills,
+                max_skills_in_prompt,
+                max_skills_prompt_chars,
+                max_skill_file_bytes,
+                max_skills_loaded_per_source,
+                &workspace_loaded,
+                &community_loaded,
+                &other_loaded,
+                &has_always,
+                &has_summary,
+                &truncated_by_count,
+                &truncated_by_chars,
+                &truncated_by_file_size,
+                &truncated_by_source_limit,
+            );
+            if (truncated_by_count or truncated_by_chars) break;
         }
     }
 
-    // Render summary skills and unavailable skills as XML
-    var has_summary = false;
-    for (skill_list) |skill| {
-        if (skill.always and skill.available) continue; // already rendered above
-        if (!has_summary) {
-            try w.writeAll("## Available Skills\n\n");
-            try w.writeAll("Use the read_file tool to load full skill instructions when needed.\n\n");
-            try w.writeAll("<available_skills>\n");
-            has_summary = true;
-        }
-        if (!skill.available) {
-            try std.fmt.format(
-                w,
-                "  <skill name=\"{s}\" description=\"{s}\" available=\"false\" missing=\"{s}\"/>\n",
-                .{ skill.name, skill.description, skill.missing_deps },
-            );
-        } else {
-            const skill_path = if (skill.path.len > 0) skill.path else workspace_dir;
-            const skill_md_path = try std.fs.path.join(allocator, &.{ skill_path, "SKILL.md" });
-            defer allocator.free(skill_md_path);
-            try std.fmt.format(
-                w,
-                "  <skill name=\"{s}\" description=\"{s}\" path=\"{s}\"/>\n",
-                .{ skill.name, skill.description, skill_md_path },
-            );
-        }
-    }
     if (has_summary) {
-        try w.writeAll("</available_skills>\n\n");
+        _ = try writeWithinBudget(w, "</available_skills>\n\n", &used_chars, max_skills_prompt_chars, &truncated_by_chars);
+    }
+
+    if (truncated_by_count or truncated_by_chars or truncated_by_file_size or truncated_candidates or truncated_by_source_limit) {
+        var note_buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer note_buf.deinit(allocator);
+        const note_w = note_buf.writer(allocator);
+        try note_w.writeAll("[skills prompt truncated:");
+        if (truncated_by_count) try note_w.writeAll(" max_skills_in_prompt");
+        if (truncated_by_chars) try note_w.writeAll(" max_skills_prompt_chars");
+        if (truncated_by_file_size) try note_w.writeAll(" max_skill_file_bytes");
+        if (truncated_candidates) try note_w.writeAll(" max_candidates_per_root");
+        if (truncated_by_source_limit) try note_w.writeAll(" max_skills_loaded_per_source");
+        try note_w.writeAll("]\n\n");
+        _ = try writeWithinBudget(w, note_buf.items, &used_chars, max_skills_prompt_chars, &truncated_by_chars);
     }
 }
 
@@ -336,7 +578,7 @@ test "appendSkillsSection with no skills produces nothing" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, workspace_dir);
+    try appendSkillsSection(allocator, w, workspace_dir, .{});
 
     try std.testing.expectEqual(@as(usize, 0), buf.items.len);
 }
@@ -374,7 +616,7 @@ test "appendSkillsSection renders summary XML for always=false skill" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, base);
+    try appendSkillsSection(allocator, w, base, .{});
 
     const output = buf.items;
     // Summary skills should appear as self-closing XML tags
@@ -427,7 +669,7 @@ test "appendSkillsSection renders full instructions for always=true skill" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, base);
+    try appendSkillsSection(allocator, w, base, .{});
 
     const output = buf.items;
     // Full instructions should be in the output
@@ -492,7 +734,7 @@ test "appendSkillsSection renders mixed always=true and always=false" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, base);
+    try appendSkillsSection(allocator, w, base, .{});
 
     const output = buf.items;
     // Full skill should be in ## Skills section
@@ -537,7 +779,7 @@ test "appendSkillsSection renders unavailable skill with missing deps" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, base);
+    try appendSkillsSection(allocator, w, base, .{});
 
     const output = buf.items;
     // Should render as unavailable in XML
@@ -588,7 +830,7 @@ test "appendSkillsSection unavailable always=true skill renders in XML not full"
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     const w = buf.writer(allocator);
-    try appendSkillsSection(allocator, w, base);
+    try appendSkillsSection(allocator, w, base, .{});
 
     const output = buf.items;
     // Even though always=true, since unavailable it should render as XML summary
@@ -597,6 +839,157 @@ test "appendSkillsSection unavailable always=true skill renders in XML not full"
     // Full instructions should NOT be in the prompt
     try std.testing.expect(std.mem.indexOf(u8, output, "These instructions should NOT appear in prompt.") == null);
     try std.testing.expect(std.mem.indexOf(u8, output, "### Skill: broken-always") == null);
+}
+
+test "appendSkillsSection enforces max_skills_in_prompt with truncation note" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_a = try std.fs.path.join(allocator, &.{ skills_dir, "a-skill" });
+    defer allocator.free(skill_a);
+    const skill_b = try std.fs.path.join(allocator, &.{ skills_dir, "b-skill" });
+    defer allocator.free(skill_b);
+    const skill_a_json = try std.fs.path.join(allocator, &.{ skill_a, "skill.json" });
+    defer allocator.free(skill_a_json);
+    const skill_b_json = try std.fs.path.join(allocator, &.{ skill_b, "skill.json" });
+    defer allocator.free(skill_b_json);
+
+    std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    std.fs.makeDirAbsolute(skill_a) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    std.fs.makeDirAbsolute(skill_b) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    {
+        const f = try std.fs.createFileAbsolute(skill_a_json, .{});
+        defer f.close();
+        try f.writeAll("{\"name\":\"a-skill\",\"description\":\"A\"}");
+    }
+    {
+        const f = try std.fs.createFileAbsolute(skill_b_json, .{});
+        defer f.close();
+        try f.writeAll("{\"name\":\"b-skill\",\"description\":\"B\"}");
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try appendSkillsSection(allocator, w, base, .{
+        .max_skills_in_prompt = 1,
+    });
+
+    const output = buf.items;
+    try std.testing.expect(std.mem.indexOf(u8, output, "name=\"a-skill\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "name=\"b-skill\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "max_skills_in_prompt") != null);
+}
+
+test "appendSkillsSection enforces max_skills_prompt_chars with truncation note" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_a = try std.fs.path.join(allocator, &.{ skills_dir, "alpha" });
+    defer allocator.free(skill_a);
+    const skill_b = try std.fs.path.join(allocator, &.{ skills_dir, "beta" });
+    defer allocator.free(skill_b);
+    const skill_a_json = try std.fs.path.join(allocator, &.{ skill_a, "skill.json" });
+    defer allocator.free(skill_a_json);
+    const skill_b_json = try std.fs.path.join(allocator, &.{ skill_b, "skill.json" });
+    defer allocator.free(skill_b_json);
+
+    std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    std.fs.makeDirAbsolute(skill_a) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    std.fs.makeDirAbsolute(skill_b) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    {
+        const f = try std.fs.createFileAbsolute(skill_a_json, .{});
+        defer f.close();
+        try f.writeAll("{\"name\":\"alpha\",\"description\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}");
+    }
+    {
+        const f = try std.fs.createFileAbsolute(skill_b_json, .{});
+        defer f.close();
+        try f.writeAll("{\"name\":\"beta\",\"description\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}");
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try appendSkillsSection(allocator, w, base, .{
+        .max_skills_prompt_chars = 220,
+    });
+
+    const output = buf.items;
+    try std.testing.expect(std.mem.indexOf(u8, output, "max_skills_prompt_chars") != null);
+}
+
+test "appendSkillsSection truncates oversized always skill file content" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const base = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const skills_dir = try std.fs.path.join(allocator, &.{ base, "skills" });
+    defer allocator.free(skills_dir);
+    const skill_dir = try std.fs.path.join(allocator, &.{ skills_dir, "large-skill" });
+    defer allocator.free(skill_dir);
+    const skill_json = try std.fs.path.join(allocator, &.{ skill_dir, "skill.json" });
+    defer allocator.free(skill_json);
+    const skill_md = try std.fs.path.join(allocator, &.{ skill_dir, "SKILL.md" });
+    defer allocator.free(skill_md);
+
+    std.fs.makeDirAbsolute(skills_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    std.fs.makeDirAbsolute(skill_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    {
+        const f = try std.fs.createFileAbsolute(skill_json, .{});
+        defer f.close();
+        try f.writeAll("{\"name\":\"large-skill\",\"description\":\"Large\",\"always\":true}");
+    }
+    {
+        const f = try std.fs.createFileAbsolute(skill_md, .{});
+        defer f.close();
+        try f.writeAll("0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz");
+    }
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    const w = buf.writer(allocator);
+    try appendSkillsSection(allocator, w, base, .{
+        .max_skill_file_bytes = 16,
+    });
+
+    const output = buf.items;
+    try std.testing.expect(std.mem.indexOf(u8, output, "0123456789abcdef") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "qrstuvwxyz") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "max_skill_file_bytes") != null);
 }
 
 test "buildSystemPrompt datetime appears before runtime" {
