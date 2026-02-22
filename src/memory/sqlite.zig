@@ -26,6 +26,12 @@ pub const SqliteMemory = struct {
     allocator: std.mem.Allocator,
 
     const Self = @This();
+    const MMR_LAMBDA: f64 = 0.72;
+    const TEMPORAL_DECAY_HALF_LIFE_DAYS: f64 = 30.0;
+    const MAX_RECALL_CANDIDATE_MULTIPLIER: usize = 4;
+    const MIN_RECALL_CANDIDATES: usize = 24;
+    const MAX_RECALL_CANDIDATES: usize = 128;
+    const LN_2: f64 = 0.6931471805599453;
 
     pub fn init(allocator: std.mem.Allocator, db_path: [*:0]const u8) !Self {
         var db: ?*c.sqlite3 = null;
@@ -222,14 +228,26 @@ pub const SqliteMemory = struct {
     fn implRecall(ptr: *anyopaque, allocator: std.mem.Allocator, query: []const u8, limit: usize, session_id: ?[]const u8) anyerror![]MemoryEntry {
         const self_: *Self = @ptrCast(@alignCast(ptr));
 
+        if (limit == 0) return allocator.alloc(MemoryEntry, 0);
+
         const trimmed = std.mem.trim(u8, query, " \t\n\r");
         if (trimmed.len == 0) return allocator.alloc(MemoryEntry, 0);
 
-        const results = try fts5Search(self_, allocator, trimmed, limit, session_id);
-        if (results.len > 0) return results;
+        const expanded_query = try expandQueryForSearch(allocator, trimmed);
+        defer allocator.free(expanded_query);
+        const effective_query = if (expanded_query.len > 0) expanded_query else trimmed;
 
-        allocator.free(results);
-        return try likeSearch(self_, allocator, trimmed, limit, session_id);
+        const candidate_limit = computeCandidateLimit(limit);
+
+        const fts_results = try fts5Search(self_, allocator, effective_query, candidate_limit, session_id);
+        if (fts_results.len > 0) {
+            return try rerankRecallResults(allocator, fts_results, limit);
+        }
+
+        allocator.free(fts_results);
+        const like_results = try likeSearch(self_, allocator, effective_query, candidate_limit, session_id);
+        if (like_results.len == 0) return like_results;
+        return try rerankRecallResults(allocator, like_results, limit);
     }
 
     fn implGet(ptr: *anyopaque, allocator: std.mem.Allocator, key: []const u8) anyerror!?MemoryEntry {
@@ -488,7 +506,10 @@ pub const SqliteMemory = struct {
         if (fts_query.items.len == 0) return allocator.alloc(MemoryEntry, 0);
 
         const sql =
-            "SELECT m.id, m.key, m.content, m.category, m.created_at, bm25(memories_fts) as score, m.session_id " ++
+            "SELECT m.id, m.key, m.content, m.category, m.created_at, m.session_id, bm25(memories_fts) as score, " ++
+            "CASE " ++
+            "WHEN instr(m.created_at, '-') > 0 THEN CAST(strftime('%s', m.created_at) AS INTEGER) " ++
+            "ELSE CAST(m.created_at AS INTEGER) END AS created_epoch " ++
             "FROM memories_fts f " ++
             "JOIN memories m ON m.rowid = f.rowid " ++
             "WHERE memories_fts MATCH ?1 " ++
@@ -515,9 +536,9 @@ pub const SqliteMemory = struct {
         while (true) {
             rc = c.sqlite3_step(stmt);
             if (rc == c.SQLITE_ROW) {
-                const score_raw = c.sqlite3_column_double(stmt.?, 5);
+                const score_raw = c.sqlite3_column_double(stmt.?, 6);
+                const created_epoch = c.sqlite3_column_int64(stmt.?, 7);
                 var entry = try readEntryFromRow(stmt.?, allocator);
-                entry.score = -score_raw; // BM25 returns negative (lower = better)
                 // Filter by session_id if requested
                 if (session_id) |sid| {
                     if (entry.session_id == null or !std.mem.eql(u8, entry.session_id.?, sid)) {
@@ -525,6 +546,8 @@ pub const SqliteMemory = struct {
                         continue;
                     }
                 }
+                // BM25 returns lower-is-better values (often negative); convert to higher-is-better.
+                entry.score = computeTemporalRelevance(-score_raw, entry, created_epoch);
                 try entries.append(allocator, entry);
             } else break;
         }
@@ -546,7 +569,12 @@ pub const SqliteMemory = struct {
         var sql_buf: std.ArrayList(u8) = .empty;
         defer sql_buf.deinit(allocator);
 
-        try sql_buf.appendSlice(allocator, "SELECT id, key, content, category, created_at, session_id FROM memories WHERE ");
+        try sql_buf.appendSlice(
+            allocator,
+            "SELECT id, key, content, category, created_at, session_id, " ++
+                "CASE WHEN instr(created_at, '-') > 0 THEN CAST(strftime('%s', created_at) AS INTEGER) ELSE CAST(created_at AS INTEGER) END AS created_epoch " ++
+                "FROM memories WHERE ",
+        );
 
         for (keywords.items, 0..) |_, i| {
             if (i > 0) try sql_buf.appendSlice(allocator, " OR ");
@@ -589,8 +617,8 @@ pub const SqliteMemory = struct {
         while (true) {
             rc = c.sqlite3_step(stmt);
             if (rc == c.SQLITE_ROW) {
+                const created_epoch = c.sqlite3_column_int64(stmt.?, 6);
                 var entry = try readEntryFromRow(stmt.?, allocator);
-                entry.score = 1.0;
                 // Filter by session_id if requested
                 if (session_id) |sid| {
                     if (entry.session_id == null or !std.mem.eql(u8, entry.session_id.?, sid)) {
@@ -598,6 +626,7 @@ pub const SqliteMemory = struct {
                         continue;
                     }
                 }
+                entry.score = computeTemporalRelevance(1.0, entry, created_epoch);
                 try entries.append(allocator, entry);
             } else break;
         }
@@ -688,6 +717,282 @@ pub const SqliteMemory = struct {
         const rand_hi = std.mem.readInt(u64, buf[0..8], .little);
         const rand_lo = std.mem.readInt(u64, buf[8..16], .little);
         return std.fmt.allocPrint(allocator, "{d}-{x}-{x}", .{ ts, rand_hi, rand_lo });
+    }
+
+    fn computeCandidateLimit(limit: usize) usize {
+        if (limit == 0) return 0;
+        const scaled = limit *| MAX_RECALL_CANDIDATE_MULTIPLIER;
+        const with_min = @max(scaled, MIN_RECALL_CANDIDATES);
+        return @min(with_min, MAX_RECALL_CANDIDATES);
+    }
+
+    fn computeTemporalRelevance(base_score: f64, entry: MemoryEntry, created_epoch: i64) f64 {
+        const safe_base = if (std.math.isFinite(base_score) and base_score > 0.0) base_score else 0.0;
+        if (safe_base <= 0.0) return 0.0;
+
+        // Core memories are treated as evergreen and are not time-decayed.
+        const decay = switch (entry.category) {
+            .core => 1.0,
+            else => computeTemporalDecayFactor(created_epoch),
+        };
+        return safe_base * decay;
+    }
+
+    fn computeTemporalDecayFactor(created_epoch: i64) f64 {
+        if (created_epoch <= 0) return 1.0;
+
+        const now_ts = std.time.timestamp();
+        if (now_ts <= created_epoch) return 1.0;
+
+        const age_seconds = now_ts - created_epoch;
+        const age_days = @as(f64, @floatFromInt(age_seconds)) / 86400.0;
+        const raw = @exp((-LN_2 * age_days) / TEMPORAL_DECAY_HALF_LIFE_DAYS);
+        if (!std.math.isFinite(raw)) return 1.0;
+        return @max(0.0, @min(1.0, raw));
+    }
+
+    fn rerankRecallResults(allocator: std.mem.Allocator, entries: []MemoryEntry, limit: usize) ![]MemoryEntry {
+        errdefer {
+            for (entries) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+        }
+
+        if (entries.len == 0) return entries;
+
+        const target = @min(limit, entries.len);
+        if (target == 0) {
+            for (entries) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+            return allocator.alloc(MemoryEntry, 0);
+        }
+
+        var base_scores = try allocator.alloc(f64, entries.len);
+        defer allocator.free(base_scores);
+
+        var max_base: f64 = 0.0;
+        for (entries, 0..) |entry, i| {
+            const raw_score = entry.score orelse 0.0;
+            const safe = if (std.math.isFinite(raw_score) and raw_score > 0.0) raw_score else 0.0;
+            base_scores[i] = safe;
+            max_base = @max(max_base, safe);
+        }
+
+        if (max_base < std.math.floatEps(f64)) {
+            for (base_scores) |*score| score.* = 1.0;
+        } else {
+            for (base_scores) |*score| score.* /= max_base;
+        }
+
+        var token_sets = try allocator.alloc([]u64, entries.len);
+        defer {
+            for (token_sets) |set| allocator.free(set);
+            allocator.free(token_sets);
+        }
+        for (entries, 0..) |entry, i| {
+            token_sets[i] = try buildEntryTokenSet(allocator, entry);
+        }
+
+        var selected_indices = try allocator.alloc(usize, target);
+        defer allocator.free(selected_indices);
+        var selected_mask = try allocator.alloc(bool, entries.len);
+        defer allocator.free(selected_mask);
+        @memset(selected_mask, false);
+
+        var ranking_scores = try allocator.alloc(f64, entries.len);
+        defer allocator.free(ranking_scores);
+        @memset(ranking_scores, 0.0);
+
+        var selected_count: usize = 0;
+        while (selected_count < target) {
+            var best_idx: ?usize = null;
+            var best_score = -std.math.inf(f64);
+
+            for (entries, 0..) |_, i| {
+                if (selected_mask[i]) continue;
+
+                var max_similarity: f64 = 0.0;
+                for (selected_indices[0..selected_count]) |selected| {
+                    max_similarity = @max(max_similarity, jaccardSimilarity(token_sets[i], token_sets[selected]));
+                }
+
+                const mmr_score = if (selected_count == 0)
+                    base_scores[i]
+                else
+                    (MMR_LAMBDA * base_scores[i]) - ((1.0 - MMR_LAMBDA) * max_similarity);
+
+                if (mmr_score > best_score) {
+                    best_score = mmr_score;
+                    best_idx = i;
+                }
+            }
+
+            if (best_idx == null) break;
+
+            const idx = best_idx.?;
+            selected_indices[selected_count] = idx;
+            selected_mask[idx] = true;
+            ranking_scores[idx] = best_score;
+            selected_count += 1;
+        }
+
+        if (selected_count == 0) {
+            for (entries) |*entry| entry.deinit(allocator);
+            allocator.free(entries);
+            return allocator.alloc(MemoryEntry, 0);
+        }
+
+        var moved_mask = try allocator.alloc(bool, entries.len);
+        defer allocator.free(moved_mask);
+        @memset(moved_mask, false);
+
+        const reranked = try allocator.alloc(MemoryEntry, selected_count);
+        for (0..selected_count) |out_idx| {
+            const src_idx = selected_indices[out_idx];
+            moved_mask[src_idx] = true;
+            var entry = entries[src_idx];
+            entry.score = ranking_scores[src_idx];
+            reranked[out_idx] = entry;
+        }
+
+        for (entries, 0..) |*entry, i| {
+            if (!moved_mask[i]) entry.deinit(allocator);
+        }
+        allocator.free(entries);
+
+        return reranked;
+    }
+
+    fn buildEntryTokenSet(allocator: std.mem.Allocator, entry: MemoryEntry) ![]u64 {
+        var hashes: std.ArrayList(u64) = .empty;
+        defer hashes.deinit(allocator);
+
+        try appendTokenHashes(allocator, &hashes, entry.key);
+        try appendTokenHashes(allocator, &hashes, entry.content);
+
+        return hashes.toOwnedSlice(allocator);
+    }
+
+    fn appendTokenHashes(allocator: std.mem.Allocator, hashes: *std.ArrayList(u64), text: []const u8) !void {
+        var token_buf: std.ArrayList(u8) = .empty;
+        defer token_buf.deinit(allocator);
+
+        for (text) |ch| {
+            if (isTokenByte(ch)) {
+                try token_buf.append(allocator, toLowerAscii(ch));
+            } else {
+                try flushTokenBuffer(allocator, hashes, &token_buf);
+            }
+        }
+        try flushTokenBuffer(allocator, hashes, &token_buf);
+    }
+
+    fn flushTokenBuffer(allocator: std.mem.Allocator, hashes: *std.ArrayList(u64), token_buf: *std.ArrayList(u8)) !void {
+        if (token_buf.items.len == 0) return;
+        defer token_buf.clearRetainingCapacity();
+
+        // Ignore trivial one-byte ASCII tokens ("a", "x", "1") to reduce noise.
+        if (token_buf.items.len < 2 and isAsciiSlice(token_buf.items)) return;
+
+        const token_hash = std.hash.Wyhash.hash(0, token_buf.items);
+        if (!containsHash(hashes.items, token_hash)) {
+            try hashes.append(allocator, token_hash);
+        }
+    }
+
+    fn jaccardSimilarity(a: []const u64, b: []const u64) f64 {
+        if (a.len == 0 or b.len == 0) return 0.0;
+
+        var intersection: usize = 0;
+        for (a) |lhs| {
+            if (containsHash(b, lhs)) intersection += 1;
+        }
+
+        const union_count = a.len + b.len - intersection;
+        if (union_count == 0) return 0.0;
+        return @as(f64, @floatFromInt(intersection)) / @as(f64, @floatFromInt(union_count));
+    }
+
+    fn containsHash(values: []const u64, needle: u64) bool {
+        for (values) |value| {
+            if (value == needle) return true;
+        }
+        return false;
+    }
+
+    fn expandQueryForSearch(allocator: std.mem.Allocator, query: []const u8) ![]u8 {
+        var tokens: std.ArrayList([]u8) = .empty;
+        defer {
+            for (tokens.items) |token| allocator.free(token);
+            tokens.deinit(allocator);
+        }
+
+        var iter = std.mem.tokenizeAny(u8, query, " \t\n\r");
+        while (iter.next()) |word| {
+            try appendExpandedToken(allocator, &tokens, word);
+            var part_iter = std.mem.tokenizeAny(u8, word, "-_/.:");
+            while (part_iter.next()) |part| {
+                try appendExpandedToken(allocator, &tokens, part);
+            }
+        }
+
+        if (tokens.items.len == 0) return try allocator.dupe(u8, query);
+
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(allocator);
+        for (tokens.items, 0..) |token, i| {
+            if (i > 0) try out.append(allocator, ' ');
+            try out.appendSlice(allocator, token);
+        }
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn appendExpandedToken(allocator: std.mem.Allocator, tokens: *std.ArrayList([]u8), raw: []const u8) !void {
+        var normalized: std.ArrayList(u8) = .empty;
+        defer normalized.deinit(allocator);
+
+        for (raw) |ch| {
+            if (isTokenByte(ch)) {
+                try normalized.append(allocator, toLowerAscii(ch));
+            }
+        }
+
+        if (normalized.items.len == 0) return;
+        if (normalized.items.len < 2 and isAsciiSlice(normalized.items)) return;
+        if (isStopWord(normalized.items)) return;
+
+        for (tokens.items) |existing| {
+            if (std.mem.eql(u8, existing, normalized.items)) return;
+        }
+
+        try tokens.append(allocator, try allocator.dupe(u8, normalized.items));
+    }
+
+    fn isStopWord(token: []const u8) bool {
+        if (!isAsciiSlice(token)) return false;
+        const stop_words = [_][]const u8{
+            "a",    "an",   "the",  "and",  "or",  "to",  "of",   "for",
+            "in",   "on",   "at",   "is",   "are", "was", "were", "be",
+            "this", "that", "with", "from", "as",  "by",  "it",
+        };
+        for (stop_words) |word| {
+            if (std.mem.eql(u8, token, word)) return true;
+        }
+        return false;
+    }
+
+    fn isTokenByte(ch: u8) bool {
+        return std.ascii.isAlphanumeric(ch) or ch >= 0x80;
+    }
+
+    fn toLowerAscii(ch: u8) u8 {
+        return if (ch < 0x80) std.ascii.toLower(ch) else ch;
+    }
+
+    fn isAsciiSlice(text: []const u8) bool {
+        for (text) |ch| {
+            if (ch >= 0x80) return false;
+        }
+        return true;
     }
 };
 
@@ -1485,4 +1790,95 @@ test "sqlite schema migration is idempotent" {
     const entry = (try m.get(std.testing.allocator, "k1")).?;
     defer entry.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("sess-x", entry.session_id.?);
+}
+
+test "sqlite query expansion splits provider style tokens" {
+    const expanded = try SqliteMemory.expandQueryForSearch(std.testing.allocator, "the gpt-4.1-mini / qwen3-max and");
+    defer std.testing.allocator.free(expanded);
+
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "gpt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "mini") != null);
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "qwen3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, expanded, "max") != null);
+}
+
+test "sqlite fts recall session filter is respected" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+    const m = mem.memory();
+
+    try m.store("sess_a_doc", "fts_filter_probe_token repeated", .conversation, "sess-a");
+    try m.store("sess_b_doc", "fts_filter_probe_token repeated", .conversation, "sess-b");
+
+    const results = try m.recall(std.testing.allocator, "fts_filter_probe_token", 10, "sess-a");
+    defer root.freeEntries(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqualStrings("sess_a_doc", results[0].key);
+}
+
+test "sqlite temporal decay prefers fresh non-core memories" {
+    var mem = try SqliteMemory.init(std.testing.allocator, ":memory:");
+    defer mem.deinit();
+    const m = mem.memory();
+
+    try m.store("stale", "temporal_decay_probe content", .conversation, null);
+    try m.store("fresh", "temporal_decay_probe content", .conversation, null);
+
+    var err_msg: [*c]u8 = null;
+    const rc = c.sqlite3_exec(
+        mem.db,
+        "UPDATE memories SET created_at='946684800', updated_at='946684800' WHERE key='stale';",
+        null,
+        null,
+        &err_msg,
+    );
+    if (err_msg) |msg| c.sqlite3_free(msg);
+    try std.testing.expectEqual(c.SQLITE_OK, rc);
+
+    const results = try m.recall(std.testing.allocator, "temporal_decay_probe", 2, null);
+    defer root.freeEntries(std.testing.allocator, results);
+
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqualStrings("fresh", results[0].key);
+}
+
+test "sqlite mmr rerank reduces near-duplicate recall" {
+    const allocator = std.testing.allocator;
+
+    const entries = try allocator.alloc(MemoryEntry, 3);
+    entries[0] = .{
+        .id = try allocator.dupe(u8, "id-a"),
+        .key = try allocator.dupe(u8, "a"),
+        .content = try allocator.dupe(u8, "zig memory safety ownership borrow checker"),
+        .category = .conversation,
+        .timestamp = try allocator.dupe(u8, "1700000000"),
+        .session_id = null,
+        .score = 1.0,
+    };
+    entries[1] = .{
+        .id = try allocator.dupe(u8, "id-b"),
+        .key = try allocator.dupe(u8, "b"),
+        .content = try allocator.dupe(u8, "zig memory safety ownership borrow checker patterns"),
+        .category = .conversation,
+        .timestamp = try allocator.dupe(u8, "1700000000"),
+        .session_id = null,
+        .score = 0.95,
+    };
+    entries[2] = .{
+        .id = try allocator.dupe(u8, "id-c"),
+        .key = try allocator.dupe(u8, "c"),
+        .content = try allocator.dupe(u8, "zig web routing http server handlers"),
+        .category = .conversation,
+        .timestamp = try allocator.dupe(u8, "1700000000"),
+        .session_id = null,
+        .score = 0.90,
+    };
+
+    const reranked = try SqliteMemory.rerankRecallResults(allocator, entries, 2);
+    defer root.freeEntries(allocator, reranked);
+
+    try std.testing.expectEqual(@as(usize, 2), reranked.len);
+    try std.testing.expectEqualStrings("a", reranked[0].key);
+    try std.testing.expectEqualStrings("c", reranked[1].key);
 }
