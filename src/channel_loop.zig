@@ -51,6 +51,10 @@ pub const ProviderHolder = union(enum) {
     openai: providers.openai.OpenAiProvider,
     gemini: providers.gemini.GeminiProvider,
     ollama: providers.ollama.OllamaProvider,
+    compatible: providers.compatible.OpenAiCompatibleProvider,
+    claude_cli: providers.claude_cli.ClaudeCliProvider,
+    codex_cli: providers.codex_cli.CodexCliProvider,
+    openai_codex: providers.openai_codex.OpenAiCodexProvider,
 
     pub fn provider(self: *ProviderHolder) providers.Provider {
         return switch (self.*) {
@@ -59,6 +63,10 @@ pub const ProviderHolder = union(enum) {
             .openai => |*p| p.provider(),
             .gemini => |*p| p.provider(),
             .ollama => |*p| p.provider(),
+            .compatible => |*p| p.provider(),
+            .claude_cli => |*p| p.provider(),
+            .codex_cli => |*p| p.provider(),
+            .openai_codex => |*p| p.provider(),
         };
     }
 };
@@ -71,6 +79,7 @@ pub const ChannelRuntime = struct {
     allocator: std.mem.Allocator,
     session_mgr: session_mod.SessionManager,
     provider_holder: *ProviderHolder,
+    resolved_api_key_owned: ?[]u8,
     subagent_mgr: *subagent_mod.SubagentManager,
     tools: []const tools_mod.Tool,
     mem: ?memory_mod.Memory,
@@ -78,22 +87,72 @@ pub const ChannelRuntime = struct {
 
     /// Initialize the runtime from config — mirrors main.zig:702-786 setup.
     pub fn init(allocator: std.mem.Allocator, config: *const Config, event_bus: ?*bus_mod.Bus) !*ChannelRuntime {
+        var resolved_key_owned: ?[]u8 = null;
+        const resolved_key: ?[]const u8 = blk: {
+            if (config.defaultProviderKey()) |k| break :blk k;
+            resolved_key_owned = providers.resolveApiKey(allocator, config.default_provider, null) catch null;
+            break :blk resolved_key_owned;
+        };
+        const provider_kind = providers.classifyProvider(config.default_provider);
+
         // Provider — heap-allocated for vtable pointer stability
         const holder = try allocator.create(ProviderHolder);
         errdefer allocator.destroy(holder);
 
-        const api_key = config.defaultProviderKey();
-        holder.* = if (std.mem.eql(u8, config.default_provider, "anthropic"))
-            .{ .anthropic = providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
-        else if (std.mem.eql(u8, config.default_provider, "openai"))
-            .{ .openai = providers.openai.OpenAiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, config.default_provider, "gemini") or
-            std.mem.eql(u8, config.default_provider, "google"))
-            .{ .gemini = providers.gemini.GeminiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, config.default_provider, "ollama"))
-            .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) }
-        else
-            .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
+        holder.* = switch (provider_kind) {
+            .anthropic_provider => .{ .anthropic = providers.anthropic.AnthropicProvider.init(
+                allocator,
+                resolved_key,
+                if (std.mem.startsWith(u8, config.default_provider, "anthropic-custom:"))
+                    config.default_provider["anthropic-custom:".len..]
+                else
+                    config.getProviderBaseUrl(config.default_provider),
+            ) },
+            .openai_provider => .{ .openai = providers.openai.OpenAiProvider.initWithBaseUrl(
+                allocator,
+                resolved_key,
+                config.getProviderBaseUrl(config.default_provider),
+            ) },
+            .gemini_provider => .{ .gemini = providers.gemini.GeminiProvider.initWithBaseUrl(
+                allocator,
+                resolved_key,
+                config.getProviderBaseUrl(config.default_provider),
+            ) },
+            .ollama_provider => .{ .ollama = providers.ollama.OllamaProvider.init(
+                allocator,
+                config.getProviderBaseUrl(config.default_provider),
+            ) },
+            .openrouter_provider => .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(
+                allocator,
+                resolved_key,
+                config.getProviderBaseUrl(config.default_provider),
+            ) },
+            .compatible_provider => .{ .compatible = providers.compatible.OpenAiCompatibleProvider.init(
+                allocator,
+                config.default_provider,
+                if (std.mem.startsWith(u8, config.default_provider, "custom:"))
+                    config.default_provider["custom:".len..]
+                else
+                    config.getProviderBaseUrl(config.default_provider) orelse
+                        providers.compatibleProviderUrl(config.default_provider) orelse "https://openrouter.ai/api/v1",
+                resolved_key,
+                .bearer,
+            ) },
+            .claude_cli_provider => if (providers.claude_cli.ClaudeCliProvider.init(allocator, null)) |p|
+                .{ .claude_cli = p }
+            else |_|
+                .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, resolved_key, config.getProviderBaseUrl(config.default_provider)) },
+            .codex_cli_provider => if (providers.codex_cli.CodexCliProvider.init(allocator, null)) |p|
+                .{ .codex_cli = p }
+            else |_|
+                .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, resolved_key, config.getProviderBaseUrl(config.default_provider)) },
+            .openai_codex_provider => .{ .openai_codex = providers.openai_codex.OpenAiCodexProvider.init(allocator, null) },
+            .unknown => .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(
+                allocator,
+                resolved_key,
+                config.getProviderBaseUrl(config.default_provider),
+            ) },
+        };
 
         const provider_i = holder.provider();
 
@@ -121,7 +180,7 @@ pub const ChannelRuntime = struct {
             .screenshot_enabled = true,
             .mcp_tools = mcp_tools,
             .agents = config.agents,
-            .fallback_api_key = config.defaultProviderKey(),
+            .fallback_api_key = resolved_key,
             .subagent_manager = subagent_mgr,
             .tools_config = config.tools,
             .security_config = config.security,
@@ -153,6 +212,7 @@ pub const ChannelRuntime = struct {
             .allocator = allocator,
             .session_mgr = session_mgr,
             .provider_holder = holder,
+            .resolved_api_key_owned = resolved_key_owned,
             .subagent_mgr = subagent_mgr,
             .tools = tools,
             .mem = mem_opt,
@@ -165,6 +225,7 @@ pub const ChannelRuntime = struct {
         const alloc = self.allocator;
         self.session_mgr.deinit();
         if (self.tools.len > 0) alloc.free(self.tools);
+        if (self.resolved_api_key_owned) |k| alloc.free(k);
         self.subagent_mgr.deinit();
         alloc.destroy(self.subagent_mgr);
         alloc.destroy(self.noop_obs);
@@ -328,4 +389,8 @@ test "ProviderHolder tagged union fields" {
     try std.testing.expect(@hasField(ProviderHolder, "openai"));
     try std.testing.expect(@hasField(ProviderHolder, "gemini"));
     try std.testing.expect(@hasField(ProviderHolder, "ollama"));
+    try std.testing.expect(@hasField(ProviderHolder, "compatible"));
+    try std.testing.expect(@hasField(ProviderHolder, "claude_cli"));
+    try std.testing.expect(@hasField(ProviderHolder, "codex_cli"));
+    try std.testing.expect(@hasField(ProviderHolder, "openai_codex"));
 }

@@ -1045,12 +1045,28 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     else
         telegram_config.allow_from;
 
-    if (config.defaultProviderKey() == null) {
+    // Resolve API key with explicit ownership:
+    // - config key: borrowed slice from config
+    // - env key: owned allocation that we free on function exit
+    var resolved_api_key_owned: ?[]u8 = null;
+    defer if (resolved_api_key_owned) |k| allocator.free(k);
+    const resolved_api_key: ?[]const u8 = blk: {
+        if (config.defaultProviderKey()) |k| break :blk k;
+        resolved_api_key_owned = yc.providers.resolveApiKey(allocator, config.default_provider, null) catch null;
+        break :blk resolved_api_key_owned;
+    };
+    const provider_kind = yc.providers.classifyProvider(config.default_provider);
+    const requires_api_key = switch (provider_kind) {
+        .ollama_provider, .claude_cli_provider, .codex_cli_provider, .openai_codex_provider => false,
+        else => true,
+    };
+
+    if (requires_api_key and resolved_api_key == null) {
         if (zh) {
             std.debug.print("未配置 API key。请在 ~/.nullclaw/config.json 添加:\n", .{});
             std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
         } else {
-            std.debug.print("No API key configured. Add to ~/.nullclaw/config.json:\n", .{});
+            std.debug.print("No API key configured. Set env var or add to ~/.nullclaw/config.json:\n", .{});
             std.debug.print("  \"providers\": {{ \"{s}\": {{ \"api_key\": \"...\" }} }}\n", .{config.default_provider});
         }
         std.process.exit(1);
@@ -1137,7 +1153,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .screenshot_enabled = true,
         .mcp_tools = mcp_tools,
         .agents = config.agents,
-        .fallback_api_key = config.defaultProviderKey(),
+        .fallback_api_key = resolved_api_key,
         .subagent_manager = &subagent_manager,
         .tools_config = config.tools,
         .security_config = config.security,
@@ -1174,21 +1190,66 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         openai: yc.providers.openai.OpenAiProvider,
         gemini: yc.providers.gemini.GeminiProvider,
         ollama: yc.providers.ollama.OllamaProvider,
+        compatible: yc.providers.compatible.OpenAiCompatibleProvider,
+        claude_cli: yc.providers.claude_cli.ClaudeCliProvider,
+        codex_cli: yc.providers.codex_cli.CodexCliProvider,
+        openai_codex: yc.providers.openai_codex.OpenAiCodexProvider,
     };
 
-    const api_key = config.defaultProviderKey();
-    var holder: ProviderHolder = if (std.mem.eql(u8, config.default_provider, "anthropic"))
-        .{ .anthropic = yc.providers.anthropic.AnthropicProvider.init(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) }
-    else if (std.mem.eql(u8, config.default_provider, "openai"))
-        .{ .openai = yc.providers.openai.OpenAiProvider.initWithBaseUrl(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) }
-    else if (std.mem.eql(u8, config.default_provider, "gemini") or
-        std.mem.eql(u8, config.default_provider, "google"))
-        .{ .gemini = yc.providers.gemini.GeminiProvider.initWithBaseUrl(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) }
-    else if (std.mem.eql(u8, config.default_provider, "ollama"))
-        .{ .ollama = yc.providers.ollama.OllamaProvider.init(allocator, config.getProviderBaseUrl(config.default_provider)) }
-    else
-        // Default: OpenRouter (also handles all other provider names)
-        .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, api_key, config.getProviderBaseUrl(config.default_provider)) };
+    var holder: ProviderHolder = switch (provider_kind) {
+        .anthropic_provider => .{ .anthropic = yc.providers.anthropic.AnthropicProvider.init(
+            allocator,
+            resolved_api_key,
+            if (std.mem.startsWith(u8, config.default_provider, "anthropic-custom:"))
+                config.default_provider["anthropic-custom:".len..]
+            else
+                config.getProviderBaseUrl(config.default_provider),
+        ) },
+        .openai_provider => .{ .openai = yc.providers.openai.OpenAiProvider.initWithBaseUrl(
+            allocator,
+            resolved_api_key,
+            config.getProviderBaseUrl(config.default_provider),
+        ) },
+        .gemini_provider => .{ .gemini = yc.providers.gemini.GeminiProvider.initWithBaseUrl(
+            allocator,
+            resolved_api_key,
+            config.getProviderBaseUrl(config.default_provider),
+        ) },
+        .ollama_provider => .{ .ollama = yc.providers.ollama.OllamaProvider.init(
+            allocator,
+            config.getProviderBaseUrl(config.default_provider),
+        ) },
+        .openrouter_provider => .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.initWithBaseUrl(
+            allocator,
+            resolved_api_key,
+            config.getProviderBaseUrl(config.default_provider),
+        ) },
+        .compatible_provider => .{ .compatible = yc.providers.compatible.OpenAiCompatibleProvider.init(
+            allocator,
+            config.default_provider,
+            if (std.mem.startsWith(u8, config.default_provider, "custom:"))
+                config.default_provider["custom:".len..]
+            else
+                config.getProviderBaseUrl(config.default_provider) orelse
+                    yc.providers.compatibleProviderUrl(config.default_provider) orelse "https://openrouter.ai/api/v1",
+            resolved_api_key,
+            .bearer,
+        ) },
+        .claude_cli_provider => if (yc.providers.claude_cli.ClaudeCliProvider.init(allocator, null)) |p|
+            .{ .claude_cli = p }
+        else |_|
+            .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, resolved_api_key, config.getProviderBaseUrl(config.default_provider)) },
+        .codex_cli_provider => if (yc.providers.codex_cli.CodexCliProvider.init(allocator, null)) |p|
+            .{ .codex_cli = p }
+        else |_|
+            .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, resolved_api_key, config.getProviderBaseUrl(config.default_provider)) },
+        .openai_codex_provider => .{ .openai_codex = yc.providers.openai_codex.OpenAiCodexProvider.init(allocator, null) },
+        .unknown => .{ .openrouter = yc.providers.openrouter.OpenRouterProvider.initWithBaseUrl(
+            allocator,
+            resolved_api_key,
+            config.getProviderBaseUrl(config.default_provider),
+        ) },
+    };
 
     const provider_i: yc.providers.Provider = switch (holder) {
         .openrouter => |*p| p.provider(),
@@ -1196,6 +1257,10 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .openai => |*p| p.provider(),
         .gemini => |*p| p.provider(),
         .ollama => |*p| p.provider(),
+        .compatible => |*p| p.provider(),
+        .claude_cli => |*p| p.provider(),
+        .codex_cli => |*p| p.provider(),
+        .openai_codex => |*p| p.provider(),
     };
 
     if (zh) {

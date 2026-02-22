@@ -645,9 +645,15 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
         openai: providers.openai.OpenAiProvider,
         gemini: providers.gemini.GeminiProvider,
         ollama: providers.ollama.OllamaProvider,
+        compatible: providers.compatible.OpenAiCompatibleProvider,
+        claude_cli: providers.claude_cli.ClaudeCliProvider,
+        codex_cli: providers.codex_cli.CodexCliProvider,
+        openai_codex: providers.openai_codex.OpenAiCodexProvider,
     };
 
     var holder_opt: ?ProviderHolder = null;
+    var resolved_api_key_owned: ?[]u8 = null;
+    defer if (resolved_api_key_owned) |k| allocator.free(k);
     var session_mgr_opt: ?session_mod.SessionManager = null;
     var tools_slice: []const tools_mod.Tool = &.{};
     var mem_opt: ?memory_mod.Memory = null;
@@ -671,19 +677,68 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
             state.whatsapp_app_secret = wa_cfg.app_secret orelse "";
         }
 
+        const resolved_api_key: ?[]const u8 = blk: {
+            if (cfg.defaultProviderKey()) |k| break :blk k;
+            resolved_api_key_owned = providers.resolveApiKey(allocator, cfg.default_provider, null) catch null;
+            break :blk resolved_api_key_owned;
+        };
+        const provider_kind = providers.classifyProvider(cfg.default_provider);
+
         // Build provider holder from configured provider name.
-        const api_key = cfg.defaultProviderKey() orelse "";
-        holder_opt = if (std.mem.eql(u8, cfg.default_provider, "anthropic"))
-            .{ .anthropic = providers.anthropic.AnthropicProvider.init(allocator, api_key, null) }
-        else if (std.mem.eql(u8, cfg.default_provider, "openai"))
-            .{ .openai = providers.openai.OpenAiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, cfg.default_provider, "gemini") or
-            std.mem.eql(u8, cfg.default_provider, "google"))
-            .{ .gemini = providers.gemini.GeminiProvider.init(allocator, api_key) }
-        else if (std.mem.eql(u8, cfg.default_provider, "ollama"))
-            .{ .ollama = providers.ollama.OllamaProvider.init(allocator, null) }
-        else
-            .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
+        holder_opt = switch (provider_kind) {
+            .anthropic_provider => .{ .anthropic = providers.anthropic.AnthropicProvider.init(
+                allocator,
+                resolved_api_key,
+                if (std.mem.startsWith(u8, cfg.default_provider, "anthropic-custom:"))
+                    cfg.default_provider["anthropic-custom:".len..]
+                else
+                    cfg.getProviderBaseUrl(cfg.default_provider),
+            ) },
+            .openai_provider => .{ .openai = providers.openai.OpenAiProvider.initWithBaseUrl(
+                allocator,
+                resolved_api_key,
+                cfg.getProviderBaseUrl(cfg.default_provider),
+            ) },
+            .gemini_provider => .{ .gemini = providers.gemini.GeminiProvider.initWithBaseUrl(
+                allocator,
+                resolved_api_key,
+                cfg.getProviderBaseUrl(cfg.default_provider),
+            ) },
+            .ollama_provider => .{ .ollama = providers.ollama.OllamaProvider.init(
+                allocator,
+                cfg.getProviderBaseUrl(cfg.default_provider),
+            ) },
+            .openrouter_provider => .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(
+                allocator,
+                resolved_api_key,
+                cfg.getProviderBaseUrl(cfg.default_provider),
+            ) },
+            .compatible_provider => .{ .compatible = providers.compatible.OpenAiCompatibleProvider.init(
+                allocator,
+                cfg.default_provider,
+                if (std.mem.startsWith(u8, cfg.default_provider, "custom:"))
+                    cfg.default_provider["custom:".len..]
+                else
+                    cfg.getProviderBaseUrl(cfg.default_provider) orelse
+                        providers.compatibleProviderUrl(cfg.default_provider) orelse "https://openrouter.ai/api/v1",
+                resolved_api_key,
+                .bearer,
+            ) },
+            .claude_cli_provider => if (providers.claude_cli.ClaudeCliProvider.init(allocator, null)) |p|
+                .{ .claude_cli = p }
+            else |_|
+                .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, resolved_api_key, cfg.getProviderBaseUrl(cfg.default_provider)) },
+            .codex_cli_provider => if (providers.codex_cli.CodexCliProvider.init(allocator, null)) |p|
+                .{ .codex_cli = p }
+            else |_|
+                .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(allocator, resolved_api_key, cfg.getProviderBaseUrl(cfg.default_provider)) },
+            .openai_codex_provider => .{ .openai_codex = providers.openai_codex.OpenAiCodexProvider.init(allocator, null) },
+            .unknown => .{ .openrouter = providers.openrouter.OpenRouterProvider.initWithBaseUrl(
+                allocator,
+                resolved_api_key,
+                cfg.getProviderBaseUrl(cfg.default_provider),
+            ) },
+        };
 
         var subagent_manager = subagent_mod.SubagentManager.init(allocator, cfg, null, .{
             .max_iterations = cfg.agent.max_tool_iterations,
@@ -699,6 +754,10 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
                 .openai => |*p| p.provider(),
                 .gemini => |*p| p.provider(),
                 .ollama => |*p| p.provider(),
+                .compatible => |*p| p.provider(),
+                .claude_cli => |*p| p.provider(),
+                .codex_cli => |*p| p.provider(),
+                .openai_codex => |*p| p.provider(),
             };
 
             // Optional memory backend.
@@ -716,7 +775,7 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
                 .browser_enabled = cfg.browser.enabled,
                 .screenshot_enabled = true,
                 .agents = cfg.agents,
-                .fallback_api_key = cfg.defaultProviderKey(),
+                .fallback_api_key = resolved_api_key,
                 .subagent_manager = &subagent_manager,
                 .security_config = cfg.security,
             }) catch &.{};
