@@ -835,12 +835,6 @@ pub const SqliteMemory = struct {
             selected_count += 1;
         }
 
-        if (selected_count == 0) {
-            for (entries) |*entry| entry.deinit(allocator);
-            allocator.free(entries);
-            return allocator.alloc(MemoryEntry, 0);
-        }
-
         var moved_mask = try allocator.alloc(bool, entries.len);
         defer allocator.free(moved_mask);
         @memset(moved_mask, false);
@@ -1881,4 +1875,25 @@ test "sqlite mmr rerank reduces near-duplicate recall" {
     try std.testing.expectEqual(@as(usize, 2), reranked.len);
     try std.testing.expectEqualStrings("a", reranked[0].key);
     try std.testing.expectEqualStrings("c", reranked[1].key);
+}
+
+test "sqlite token hashing handles UTF-8 text safely" {
+    const allocator = std.testing.allocator;
+
+    const entry = MemoryEntry{
+        .id = try allocator.dupe(u8, "id-utf8"),
+        .key = try allocator.dupe(u8, "键-key"),
+        .content = try allocator.dupe(u8, "你好，Nullclaw 🚀 mixed UTF-8 tokens"),
+        .category = .conversation,
+        .timestamp = try allocator.dupe(u8, "1700000000"),
+        .session_id = null,
+        .score = 1.0,
+    };
+    defer entry.deinit(allocator);
+
+    const token_set = try SqliteMemory.buildEntryTokenSet(allocator, entry);
+    defer allocator.free(token_set);
+
+    // Non-empty result confirms tokenization/hash path completed without panic.
+    try std.testing.expect(token_set.len > 0);
 }
