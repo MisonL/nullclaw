@@ -11,11 +11,13 @@ const session_mod = @import("session.zig");
 const providers = @import("providers/root.zig");
 const memory_mod = @import("memory/root.zig");
 const observability = @import("observability.zig");
+const subagent_mod = @import("subagent.zig");
 const tools_mod = @import("tools/root.zig");
 const mcp = @import("mcp.zig");
 const voice = @import("voice.zig");
 const health = @import("health.zig");
 const daemon = @import("daemon.zig");
+const bus_mod = @import("bus.zig");
 
 const log = std.log.scoped(.channel_loop);
 
@@ -69,12 +71,13 @@ pub const ChannelRuntime = struct {
     allocator: std.mem.Allocator,
     session_mgr: session_mod.SessionManager,
     provider_holder: *ProviderHolder,
+    subagent_mgr: *subagent_mod.SubagentManager,
     tools: []const tools_mod.Tool,
     mem: ?memory_mod.Memory,
     noop_obs: *observability.NoopObserver,
 
     /// Initialize the runtime from config — mirrors main.zig:702-786 setup.
-    pub fn init(allocator: std.mem.Allocator, config: *const Config) !*ChannelRuntime {
+    pub fn init(allocator: std.mem.Allocator, config: *const Config, event_bus: ?*bus_mod.Bus) !*ChannelRuntime {
         // Provider — heap-allocated for vtable pointer stability
         const holder = try allocator.create(ProviderHolder);
         errdefer allocator.destroy(holder);
@@ -94,6 +97,14 @@ pub const ChannelRuntime = struct {
 
         const provider_i = holder.provider();
 
+        const subagent_mgr = try allocator.create(subagent_mod.SubagentManager);
+        errdefer allocator.destroy(subagent_mgr);
+        subagent_mgr.* = subagent_mod.SubagentManager.init(allocator, config, event_bus, .{
+            .max_iterations = config.agent.max_tool_iterations,
+            .max_concurrent = config.scheduler.max_concurrent,
+        });
+        errdefer subagent_mgr.deinit();
+
         // MCP tools
         const mcp_tools: ?[]const tools_mod.Tool = if (config.mcp_servers.len > 0)
             mcp.initMcpTools(allocator, config.mcp_servers) catch |err| blk: {
@@ -111,6 +122,7 @@ pub const ChannelRuntime = struct {
             .mcp_tools = mcp_tools,
             .agents = config.agents,
             .fallback_api_key = config.defaultProviderKey(),
+            .subagent_manager = subagent_mgr,
             .tools_config = config.tools,
             .security_config = config.security,
         }) catch &.{};
@@ -141,6 +153,7 @@ pub const ChannelRuntime = struct {
             .allocator = allocator,
             .session_mgr = session_mgr,
             .provider_holder = holder,
+            .subagent_mgr = subagent_mgr,
             .tools = tools,
             .mem = mem_opt,
             .noop_obs = noop_obs,
@@ -152,6 +165,8 @@ pub const ChannelRuntime = struct {
         const alloc = self.allocator;
         self.session_mgr.deinit();
         if (self.tools.len > 0) alloc.free(self.tools);
+        self.subagent_mgr.deinit();
+        alloc.destroy(self.subagent_mgr);
         alloc.destroy(self.noop_obs);
         alloc.destroy(self.provider_holder);
         alloc.destroy(self);

@@ -36,7 +36,7 @@ pub const SpawnTool = struct {
     }
 
     fn vtableDesc(_: *anyopaque) []const u8 {
-        return "Spawn a background subagent to work on a task asynchronously. Returns a task ID immediately. Results are delivered as system messages when complete.";
+        return "Spawn a background subagent to work on a task asynchronously. Returns a task ID immediately.";
     }
 
     fn vtableParams(_: *anyopaque) []const u8 {
@@ -69,11 +69,18 @@ pub const SpawnTool = struct {
             };
         };
 
-        const msg = std.fmt.allocPrint(
-            allocator,
-            "Subagent '{s}' spawned with task_id={d}. Results will be delivered as system messages.",
-            .{ label, task_id },
-        ) catch return ToolResult.ok("Subagent spawned");
+        const msg = if (manager.bus != null)
+            std.fmt.allocPrint(
+                allocator,
+                "Subagent '{s}' spawned with task_id={d}. Results will be delivered as system messages.",
+                .{ label, task_id },
+            ) catch return ToolResult.ok("Subagent spawned")
+        else
+            std.fmt.allocPrint(
+                allocator,
+                "Subagent '{s}' spawned with task_id={d}. This runtime has no event bus; check {s}/state/subagents.json for completion status.",
+                .{ label, task_id, manager.workspace_dir },
+            ) catch return ToolResult.ok("Subagent spawned");
 
         return ToolResult.ok(msg);
     }

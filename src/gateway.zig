@@ -16,6 +16,7 @@ const Config = @import("config.zig").Config;
 const locale = @import("locale.zig");
 const session_mod = @import("session.zig");
 const providers = @import("providers/root.zig");
+const subagent_mod = @import("subagent.zig");
 const tools_mod = @import("tools/root.zig");
 const memory_mod = @import("memory/root.zig");
 const observability = @import("observability.zig");
@@ -684,6 +685,12 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
         else
             .{ .openrouter = providers.openrouter.OpenRouterProvider.init(allocator, api_key) };
 
+        var subagent_manager = subagent_mod.SubagentManager.init(allocator, cfg, null, .{
+            .max_iterations = cfg.agent.max_tool_iterations,
+            .max_concurrent = cfg.scheduler.max_concurrent,
+        });
+        defer subagent_manager.deinit();
+
         // Build provider vtable from the holder.
         if (holder_opt) |*h| {
             const provider_i: providers.Provider = switch (h.*) {
@@ -710,6 +717,7 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
                 .screenshot_enabled = true,
                 .agents = cfg.agents,
                 .fallback_api_key = cfg.defaultProviderKey(),
+                .subagent_manager = &subagent_manager,
                 .security_config = cfg.security,
             }) catch &.{};
 

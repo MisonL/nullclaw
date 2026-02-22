@@ -24,6 +24,7 @@ pub const service = @import("service.zig");
 pub const daemon = @import("daemon.zig");
 pub const channel_loop = @import("channel_loop.zig");
 pub const migration = @import("migration.zig");
+pub const hooks = @import("hooks.zig");
 
 // Phase 2: Agent core
 pub const agent = @import("agent.zig");

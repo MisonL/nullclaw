@@ -1124,6 +1124,12 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     else
         null;
 
+    var subagent_manager = yc.subagent.SubagentManager.init(allocator, &config, null, .{
+        .max_iterations = config.agent.max_tool_iterations,
+        .max_concurrent = config.scheduler.max_concurrent,
+    });
+    defer subagent_manager.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -1132,6 +1138,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         .mcp_tools = mcp_tools,
         .agents = config.agents,
         .fallback_api_key = config.defaultProviderKey(),
+        .subagent_manager = &subagent_manager,
         .tools_config = config.tools,
         .security_config = config.security,
     }) catch &.{};

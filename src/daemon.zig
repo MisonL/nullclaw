@@ -7,12 +7,14 @@
 //!   - Ctrl+C graceful shutdown
 
 const std = @import("std");
+const builtin = @import("builtin");
 const health = @import("health.zig");
 const Config = @import("config.zig").Config;
 const locale = @import("locale.zig");
 const CronScheduler = @import("cron.zig").CronScheduler;
 const cron = @import("cron.zig");
 const bus_mod = @import("bus.zig");
+const providers = @import("providers/root.zig");
 const dispatch = @import("channels/dispatch.zig");
 const channel_loop = @import("channel_loop.zig");
 const telegram = @import("channels/telegram.zig");
@@ -175,12 +177,113 @@ const CHANNEL_WATCH_INTERVAL_SECS: u64 = 60;
 
 /// Scheduler supervision thread — loads cron jobs and runs the scheduler loop.
 /// On error (scheduler crash), logs and restarts with exponential backoff.
+const SchedulerAgentRunner = struct {
+    config: *const Config,
+};
+
+const InboundProcessor = struct {
+    ctx: *anyopaque,
+    process: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator, session_key: []const u8, content: []const u8) anyerror![]const u8,
+};
+
+const InboundDispatchStats = struct {
+    consumed: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    processed: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    enqueued_outbound: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    process_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    publish_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+};
+
+const ChannelRuntimeProcessorCtx = struct {
+    runtime: *channel_loop.ChannelRuntime,
+};
+
+fn processInboundWithChannelRuntime(ctx: *anyopaque, _: std.mem.Allocator, session_key: []const u8, content: []const u8) anyerror![]const u8 {
+    const runtime_ctx: *ChannelRuntimeProcessorCtx = @ptrCast(@alignCast(ctx));
+    return runtime_ctx.runtime.session_mgr.processMessage(session_key, content);
+}
+
+fn handleInboundMessage(
+    allocator: std.mem.Allocator,
+    event_bus: *bus_mod.Bus,
+    processor: InboundProcessor,
+    msg: *const bus_mod.InboundMessage,
+    stats: *InboundDispatchStats,
+) void {
+    _ = stats.consumed.fetchAdd(1, .monotonic);
+
+    const response = processor.process(processor.ctx, allocator, msg.session_key, msg.content) catch |err| {
+        _ = stats.process_errors.fetchAdd(1, .monotonic);
+        if (!builtin.is_test) {
+            log.warn("inbound dispatcher: failed to process message for session '{s}': {}", .{ msg.session_key, err });
+        }
+        return;
+    };
+    defer allocator.free(response);
+
+    _ = stats.processed.fetchAdd(1, .monotonic);
+    if (response.len == 0) return;
+
+    const outbound = bus_mod.makeOutbound(allocator, msg.channel, msg.chat_id, response) catch |err| {
+        _ = stats.publish_errors.fetchAdd(1, .monotonic);
+        if (!builtin.is_test) {
+            log.warn("inbound dispatcher: failed to build outbound message: {}", .{err});
+        }
+        return;
+    };
+    event_bus.publishOutbound(outbound) catch |err| {
+        outbound.deinit(allocator);
+        _ = stats.publish_errors.fetchAdd(1, .monotonic);
+        if (!builtin.is_test) {
+            log.warn("inbound dispatcher: failed to publish outbound message: {}", .{err});
+        }
+        return;
+    };
+    _ = stats.enqueued_outbound.fetchAdd(1, .monotonic);
+}
+
+/// Inbound dispatcher: consumes bus inbound messages and routes them through SessionManager.
+fn runInboundDispatcher(
+    allocator: std.mem.Allocator,
+    event_bus: *bus_mod.Bus,
+    processor: InboundProcessor,
+    stats: *InboundDispatchStats,
+) void {
+    while (event_bus.consumeInbound()) |msg| {
+        var owned = msg;
+        defer owned.deinit(allocator);
+        handleInboundMessage(allocator, event_bus, processor, &owned, stats);
+        health.markComponentOk("inbound_dispatcher");
+    }
+}
+
+fn runScheduledAgentJob(ctx: *anyopaque, allocator: std.mem.Allocator, job: *const cron.CronJob) anyerror![]const u8 {
+    const runner: *SchedulerAgentRunner = @ptrCast(@alignCast(ctx));
+    const prompt_text = job.prompt orelse job.command;
+    const selected_model = job.model orelse runner.config.default_model orelse "anthropic/claude-sonnet-4";
+    const system_prompt: []const u8 = switch (job.session_target) {
+        .isolated => "You are an isolated scheduled task runner. Execute the user's request and return only the final result.",
+        .main => "You are a scheduled task runner. Continue with the request and return only the final result.",
+    };
+
+    const provider_cfg = .{
+        .api_key = runner.config.defaultProviderKey(),
+        .default_provider = runner.config.default_provider,
+        .default_model = @as(?[]const u8, selected_model),
+        .temperature = runner.config.default_temperature,
+        .max_tokens = @as(?u64, runner.config.max_tokens),
+    };
+    return providers.completeWithSystem(allocator, &provider_cfg, system_prompt, prompt_text);
+}
+
 fn schedulerThread(allocator: std.mem.Allocator, config: *const Config, state: *DaemonState, event_bus: *bus_mod.Bus) void {
     var backoff_secs: u64 = SCHEDULER_INITIAL_BACKOFF_SECS;
+    var runner = SchedulerAgentRunner{ .config = config };
 
     while (!isShutdownRequested()) {
         var scheduler = CronScheduler.init(allocator, config.scheduler.max_tasks, config.scheduler.enabled);
         defer scheduler.deinit();
+        scheduler.setAgentRunner(&runner, runScheduledAgentJob);
 
         // Load persisted jobs (ignore errors — fresh start if file missing)
         cron.loadJobs(&scheduler) catch {};
@@ -465,7 +568,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     // Channel runtime for supervised polling (provider, tools, sessions)
     var channel_rt: ?*channel_loop.ChannelRuntime = null;
     if (hasSupervisedChannels(config)) {
-        channel_rt = channel_loop.ChannelRuntime.init(allocator, config) catch |err| blk: {
+        channel_rt = channel_loop.ChannelRuntime.init(allocator, config, &event_bus) catch |err| blk: {
             if (zh) {
                 stdout.print("警告: 频道运行时初始化失败: {}\n", .{err}) catch {};
             } else {
@@ -494,6 +597,32 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         }
     }
     var dispatch_stats = dispatch.DispatchStats{};
+    var inbound_stats = InboundDispatchStats{};
+    var inbound_thread: ?std.Thread = null;
+    var inbound_processor_ctx: ChannelRuntimeProcessorCtx = undefined;
+
+    if (channel_rt) |rt| {
+        state.addComponent("inbound_dispatcher");
+        inbound_processor_ctx = .{ .runtime = rt };
+        const processor = InboundProcessor{
+            .ctx = @ptrCast(&inbound_processor_ctx),
+            .process = processInboundWithChannelRuntime,
+        };
+        if (std.Thread.spawn(.{ .stack_size = 512 * 1024 }, runInboundDispatcher, .{
+            allocator, &event_bus, processor, &inbound_stats,
+        })) |thread| {
+            inbound_thread = thread;
+            state.markRunning("inbound_dispatcher");
+            health.markComponentOk("inbound_dispatcher");
+        } else |err| {
+            state.markError("inbound_dispatcher", @errorName(err));
+            if (zh) {
+                stdout.print("警告: 入站分发线程失败: {}\n", .{err}) catch {};
+            } else {
+                stdout.print("Warning: inbound dispatcher thread failed: {}\n", .{err}) catch {};
+            }
+        }
+    }
 
     state.addComponent("outbound_dispatcher");
 
@@ -533,6 +662,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
 
     // Wait for threads
     if (dispatcher_thread) |t| t.join();
+    if (inbound_thread) |t| t.join();
     if (chan_thread) |t| t.join();
     if (sched_thread) |t| t.join();
     if (hb_thread) |t| t.join();
@@ -700,4 +830,67 @@ test "writeStateFile produces valid content" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"status\": \"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "test-comp") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "127.0.0.1:8080") != null);
+}
+
+test "handleInboundMessage publishes outbound response" {
+    const allocator = std.testing.allocator;
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+
+    const Mock = struct {
+        fn run(_: *anyopaque, alloc: std.mem.Allocator, session_key: []const u8, content: []const u8) anyerror![]const u8 {
+            return std.fmt.allocPrint(alloc, "reply[{s}]={s}", .{ session_key, content });
+        }
+    };
+    var dummy: u8 = 0;
+    const processor = InboundProcessor{
+        .ctx = @ptrCast(&dummy),
+        .process = Mock.run,
+    };
+    var stats = InboundDispatchStats{};
+
+    var in_msg = try bus_mod.makeInbound(allocator, "telegram", "user-1", "chat-9", "hello", "telegram:chat-9");
+    defer in_msg.deinit(allocator);
+    handleInboundMessage(allocator, &event_bus, processor, &in_msg, &stats);
+
+    try std.testing.expectEqual(@as(u64, 1), stats.consumed.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), stats.processed.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), stats.enqueued_outbound.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), stats.process_errors.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), stats.publish_errors.load(.monotonic));
+
+    var out_msg = event_bus.consumeOutbound().?;
+    defer out_msg.deinit(allocator);
+    try std.testing.expectEqualStrings("telegram", out_msg.channel);
+    try std.testing.expectEqualStrings("chat-9", out_msg.chat_id);
+    try std.testing.expect(std.mem.indexOf(u8, out_msg.content, "reply[telegram:chat-9]=hello") != null);
+}
+
+test "handleInboundMessage records processor error" {
+    const allocator = std.testing.allocator;
+    var event_bus = bus_mod.Bus.init();
+    defer event_bus.close();
+
+    const Mock = struct {
+        fn run(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: []const u8) anyerror![]const u8 {
+            return error.TestFailure;
+        }
+    };
+    var dummy: u8 = 0;
+    const processor = InboundProcessor{
+        .ctx = @ptrCast(&dummy),
+        .process = Mock.run,
+    };
+    var stats = InboundDispatchStats{};
+
+    var in_msg = try bus_mod.makeInbound(allocator, "telegram", "user-2", "chat-2", "boom", "telegram:chat-2");
+    defer in_msg.deinit(allocator);
+    handleInboundMessage(allocator, &event_bus, processor, &in_msg, &stats);
+
+    try std.testing.expectEqual(@as(u64, 1), stats.consumed.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), stats.processed.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), stats.enqueued_outbound.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 1), stats.process_errors.load(.monotonic));
+    try std.testing.expectEqual(@as(u64, 0), stats.publish_errors.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), event_bus.outboundDepth());
 }
