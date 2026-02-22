@@ -1,8 +1,33 @@
 zig-out/
 zig-cache/
 .zig-cache/
+zig-out-release-check/
+
+# Local test/build artifacts
+test-output.txt
+*.profraw
+*.profdata
+
+# Local diagnostics
+crash.txt
+leak.txt
+leak2.txt
+
+# Local analysis scratch files
+phase_a_b.patch
+Comprehensive Openclaw Analysis.md
+
+# Editor/OS noise
+.vscode/
+.idea/
+*.code-workspace
+Thumbs.db
+Desktop.ini
+
 *.db
 *.db-journal
+*.sqlite
+*.sqlite3
 .DS_Store
 .env
 .env.*
