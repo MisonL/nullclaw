@@ -5,6 +5,7 @@
 //! scheduling, delegation, browser, and image tools.
 
 const std = @import("std");
+const plugins_mod = @import("../plugins.zig");
 
 // ── JSON arg extraction helpers ─────────────────────────────────
 // Used by all tool implementations to extract typed fields from
@@ -222,17 +223,21 @@ pub fn allTools(
         http_enabled: bool = false,
         browser_enabled: bool = false,
         screenshot_enabled: bool = false,
+        browser_config: @import("../config.zig").BrowserConfig = .{},
         composio_api_key: ?[]const u8 = null,
         browser_open_domains: ?[]const []const u8 = null,
         hardware_boards: ?[]const []const u8 = null,
         mcp_tools: ?[]const Tool = null,
         agents: ?[]const @import("../config.zig").NamedAgentConfig = null,
         fallback_api_key: ?[]const u8 = null,
+        max_model_fallback_hops: u32 = 0,
         delegate_depth: u32 = 0,
         subagent_manager: ?*@import("../subagent.zig").SubagentManager = null,
         allowed_paths: []const []const u8 = &.{},
         tools_config: @import("../config.zig").ToolsConfig = .{},
         security_config: @import("../config.zig").SecurityConfig = .{},
+        plugins_config: @import("../config.zig").PluginsConfig = .{},
+        hooks_bus: ?*@import("../hooks.zig").HookBus = null,
     },
 ) ![]Tool {
     var list: std.ArrayList(Tool) = .{};
@@ -291,6 +296,7 @@ pub fn allTools(
     dlt.* = .{
         .agents = opts.agents orelse &.{},
         .fallback_api_key = opts.fallback_api_key,
+        .max_model_fallback_hops = opts.max_model_fallback_hops,
         .depth = opts.delegate_depth,
     };
     try list.append(allocator, dlt.tool());
@@ -312,7 +318,14 @@ pub fn allTools(
 
     if (opts.browser_enabled) {
         const bt = try allocator.create(browser.BrowserTool);
-        bt.* = .{};
+        bt.* = .{
+            .workspace_dir = workspace_dir,
+            .cdp_enabled = opts.browser_config.cdp_enabled,
+            .cdp_endpoint = opts.browser_config.cdp_endpoint,
+            .cdp_connect_timeout_ms = opts.browser_config.cdp_connect_timeout_ms,
+            .cdp_action_timeout_ms = opts.browser_config.cdp_action_timeout_ms,
+            .cdp_allow_remote = opts.browser_config.cdp_allow_remote,
+        };
         try list.append(allocator, bt.tool());
     }
 
@@ -354,6 +367,9 @@ pub fn allTools(
             try list.append(allocator, t);
         }
     }
+
+    // Optional WASM plugin tools
+    plugins_mod.appendPluginTools(allocator, workspace_dir, opts.plugins_config, &list, opts.hooks_bus) catch {};
 
     return list.toOwnedSlice(allocator);
 }

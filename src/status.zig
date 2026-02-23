@@ -42,6 +42,51 @@ fn hostOsLabel() []const u8 {
     };
 }
 
+const DaemonFeedbackSnapshot = struct {
+    found: bool = false,
+    turn_complete: u64 = 0,
+    model_fallback: u64 = 0,
+    tool_loop_warning: u64 = 0,
+    tool_loop_breaker: u64 = 0,
+    last_critical_event_unix: i64 = 0,
+};
+
+fn loadDaemonFeedback(allocator: std.mem.Allocator, cfg: *const Config) DaemonFeedbackSnapshot {
+    const cfg_dir = std.fs.path.dirname(cfg.config_path) orelse return .{};
+    const state_path = std.fs.path.join(allocator, &.{ cfg_dir, "daemon_state.json" }) catch return .{};
+    defer allocator.free(state_path);
+
+    const content = std.fs.openFileAbsolute(state_path, .{}) catch return .{};
+    defer content.close();
+
+    const bytes = content.readToEndAlloc(allocator, 1024 * 256) catch return .{};
+    defer allocator.free(bytes);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return .{};
+    defer parsed.deinit();
+    if (parsed.value != .object) return .{};
+    const feedback_val = parsed.value.object.get("feedback") orelse return .{};
+    if (feedback_val != .object) return .{};
+
+    var snap = DaemonFeedbackSnapshot{ .found = true };
+    if (feedback_val.object.get("turn_complete")) |v| {
+        if (v == .integer) snap.turn_complete = @intCast(v.integer);
+    }
+    if (feedback_val.object.get("model_fallback")) |v| {
+        if (v == .integer) snap.model_fallback = @intCast(v.integer);
+    }
+    if (feedback_val.object.get("tool_loop_warning")) |v| {
+        if (v == .integer) snap.tool_loop_warning = @intCast(v.integer);
+    }
+    if (feedback_val.object.get("tool_loop_breaker")) |v| {
+        if (v == .integer) snap.tool_loop_breaker = @intCast(v.integer);
+    }
+    if (feedback_val.object.get("last_critical_event_unix")) |v| {
+        if (v == .integer) snap.last_critical_event_unix = @intCast(v.integer);
+    }
+    return snap;
+}
+
 fn detectShellLabel(allocator: std.mem.Allocator, zh: bool) ![]u8 {
     if (readEnvOwned(allocator, "MSYSTEM")) |msystem| {
         defer allocator.free(msystem);
@@ -221,6 +266,37 @@ pub fn run(allocator: std.mem.Allocator) !void {
         try w.print("审计:        {s}\n", .{enabled_disabled(cfg.security.audit.enabled, zh)});
     } else {
         try w.print("Audit:       {s}\n", .{enabled_disabled(cfg.security.audit.enabled, zh)});
+    }
+
+    const daemon_feedback = loadDaemonFeedback(allocator, &cfg);
+    if (daemon_feedback.found) {
+        if (zh) {
+            try w.print(
+                "守护反馈:    turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
+                .{
+                    daemon_feedback.turn_complete,
+                    daemon_feedback.model_fallback,
+                    daemon_feedback.tool_loop_warning,
+                    daemon_feedback.tool_loop_breaker,
+                },
+            );
+            if (daemon_feedback.last_critical_event_unix > 0) {
+                try w.print("最近关键事件(Unix): {d}\n", .{daemon_feedback.last_critical_event_unix});
+            }
+        } else {
+            try w.print(
+                "Daemon feedback: turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
+                .{
+                    daemon_feedback.turn_complete,
+                    daemon_feedback.model_fallback,
+                    daemon_feedback.tool_loop_warning,
+                    daemon_feedback.tool_loop_breaker,
+                },
+            );
+            if (daemon_feedback.last_critical_event_unix > 0) {
+                try w.print("Last critical event (unix): {d}\n", .{daemon_feedback.last_critical_event_unix});
+            }
+        }
     }
 
     try w.print("\n", .{});

@@ -27,6 +27,7 @@ const Command = enum {
     hardware,
     migrate,
     models,
+    mcp,
     help,
 };
 
@@ -77,6 +78,7 @@ fn parseCommand(arg: []const u8) ?Command {
         .{ "hardware", .hardware },
         .{ "migrate", .migrate },
         .{ "models", .models },
+        .{ "mcp", .mcp },
         .{ "help", .help },
         .{ "--help", .help },
         .{ "-h", .help },
@@ -132,6 +134,7 @@ pub fn main() !void {
         .hardware => try runHardware(allocator, sub_args),
         .migrate => try runMigrate(allocator, sub_args),
         .models => try runModels(allocator, sub_args),
+        .mcp => try runMcp(allocator, sub_args),
     }
 }
 
@@ -189,6 +192,37 @@ fn runDaemon(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
     }
 
     try yc.daemon.run(allocator, &cfg, host, port);
+}
+
+// ── MCP Server ───────────────────────────────────────────────────
+
+fn runMcp(allocator: std.mem.Allocator, sub_args: []const []const u8) !void {
+    const zh = is_zh_ui();
+    if (sub_args.len < 1 or !std.mem.eql(u8, sub_args[0], "serve")) {
+        if (zh) {
+            std.debug.print("用法: nullclaw mcp serve\n", .{});
+        } else {
+            std.debug.print("Usage: nullclaw mcp serve\n", .{});
+        }
+        std.process.exit(1);
+    }
+
+    var cfg = yc.config.Config.load(allocator) catch {
+        print_no_config_and_exit();
+    };
+    defer cfg.deinit();
+
+    yc.mcp_server.serve(allocator, &cfg, null) catch |err| {
+        if (err == error.McpServerDisabled) {
+            if (zh) {
+                std.debug.print("MCP server 已禁用，请在配置中设置 `mcp.enabled=true`。\n", .{});
+            } else {
+                std.debug.print("MCP server is disabled. Set `mcp.enabled=true` in config.\n", .{});
+            }
+            std.process.exit(1);
+        }
+        return err;
+    };
 }
 
 // ── Service ──────────────────────────────────────────────────────
@@ -1150,13 +1184,16 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
         .browser_enabled = config.browser.enabled,
+        .browser_config = config.browser,
         .screenshot_enabled = true,
         .mcp_tools = mcp_tools,
         .agents = config.agents,
         .fallback_api_key = resolved_api_key,
+        .max_model_fallback_hops = config.reliability.max_model_fallback_hops,
         .subagent_manager = &subagent_manager,
         .tools_config = config.tools,
         .security_config = config.security,
+        .plugins_config = config.plugins,
     }) catch &.{};
     defer if (tools.len > 0) allocator.free(tools);
 
@@ -1283,7 +1320,7 @@ fn runChannelStart(allocator: std.mem.Allocator, args: []const []const u8) !void
         std.debug.print("  Polling for messages... (Ctrl+C to stop)\n\n", .{});
     }
 
-    var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs);
+    var session_mgr = yc.session.SessionManager.init(allocator, &config, provider_i, tools, mem_opt, obs, null);
     defer session_mgr.deinit();
 
     var typing = yc.channels.telegram.TypingIndicator.init(&tg);
@@ -1405,6 +1442,7 @@ fn printUsage() void {
         \\  hardware    Discover and manage hardware
         \\  migrate     Migrate data from other agent runtimes
         \\  models      Manage provider model catalogs
+        \\  mcp         Run MCP server (stdio)
         \\  help        Show this help
         \\
         \\OPTIONS:
@@ -1419,6 +1457,7 @@ fn printUsage() void {
         \\  hardware <discover|introspect|info> [ARGS]
         \\  migrate openclaw [--dry-run] [--source PATH]
         \\  models refresh
+        \\  mcp serve
         \\
     ;
     const usage_zh =
@@ -1441,6 +1480,7 @@ fn printUsage() void {
         \\  hardware    发现并管理硬件
         \\  migrate     从其他 Agent 运行时迁移数据
         \\  models      管理模型目录
+        \\  mcp         运行 MCP 服务（stdio）
         \\  help        显示帮助
         \\
         \\选项:
@@ -1455,6 +1495,7 @@ fn printUsage() void {
         \\  hardware <discover|introspect|info> [ARGS]
         \\  migrate openclaw [--dry-run] [--source PATH]
         \\  models refresh
+        \\  mcp serve
         \\
     ;
     if (is_zh_ui()) {
@@ -1470,5 +1511,6 @@ test "parse known commands" {
     try std.testing.expectEqual(.service, parseCommand("service").?);
     try std.testing.expectEqual(.migrate, parseCommand("migrate").?);
     try std.testing.expectEqual(.models, parseCommand("models").?);
+    try std.testing.expectEqual(.mcp, parseCommand("mcp").?);
     try std.testing.expect(parseCommand("unknown") == null);
 }

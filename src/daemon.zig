@@ -18,6 +18,7 @@ const providers = @import("providers/root.zig");
 const dispatch = @import("channels/dispatch.zig");
 const channel_loop = @import("channel_loop.zig");
 const telegram = @import("channels/telegram.zig");
+const hooks_mod = @import("hooks.zig");
 
 const log = std.log.scoped(.daemon);
 
@@ -46,6 +47,11 @@ pub const DaemonState = struct {
     gateway_port: u16 = 3000,
     components: [MAX_COMPONENTS]?ComponentStatus = .{null} ** MAX_COMPONENTS,
     component_count: usize = 0,
+    turn_complete_count: u64 = 0,
+    model_fallback_count: u64 = 0,
+    tool_loop_warning_count: u64 = 0,
+    tool_loop_breaker_count: u64 = 0,
+    last_critical_event_unix: i64 = 0,
 
     pub fn addComponent(self: *DaemonState, name: []const u8) void {
         if (self.component_count < MAX_COMPONENTS) {
@@ -108,7 +114,19 @@ pub fn writeStateFile(allocator: std.mem.Allocator, path: []const u8, state: *co
             , .{ comp.name, comp.running, comp.restart_count });
         }
     }
-    try buf.appendSlice(allocator, "\n  ]\n}\n");
+    try buf.appendSlice(allocator, "\n  ],\n");
+    try std.fmt.format(
+        buf.writer(allocator),
+        "  \"feedback\": {{\"turn_complete\": {d}, \"model_fallback\": {d}, \"tool_loop_warning\": {d}, \"tool_loop_breaker\": {d}, \"last_critical_event_unix\": {d}}}\n",
+        .{
+            state.turn_complete_count,
+            state.model_fallback_count,
+            state.tool_loop_warning_count,
+            state.tool_loop_breaker_count,
+            state.last_critical_event_unix,
+        },
+    );
+    try buf.appendSlice(allocator, "}\n");
 
     const file = try std.fs.createFileAbsolute(path, .{});
     defer file.close();
@@ -155,14 +173,40 @@ fn gatewayThread(allocator: std.mem.Allocator, host: []const u8, port: u16, stat
 }
 
 /// Heartbeat thread — periodically writes state file and checks health.
-fn heartbeatThread(allocator: std.mem.Allocator, config: *const Config, state: *DaemonState) void {
+fn heartbeatThread(
+    allocator: std.mem.Allocator,
+    config: *const Config,
+    state: *DaemonState,
+    feedback: ?*const FeedbackCounters,
+    hook_bus: ?*hooks_mod.HookBus,
+    flush_interval_secs: u64,
+) void {
     const state_path = stateFilePath(allocator, config) catch return;
     defer allocator.free(state_path);
 
     while (!isShutdownRequested()) {
+        if (feedback) |fb| {
+            state.turn_complete_count = fb.turn_complete.load(.acquire);
+            state.model_fallback_count = fb.model_fallback.load(.acquire);
+            state.tool_loop_warning_count = fb.tool_loop_warning.load(.acquire);
+            state.tool_loop_breaker_count = fb.tool_loop_breaker.load(.acquire);
+            state.last_critical_event_unix = fb.last_critical_event_unix.load(.acquire);
+
+            if (hook_bus) |bus| {
+                var evt: hooks_mod.HookEvent = .{
+                    .daemon_feedback_tick = .{
+                        .turn_complete_count = state.turn_complete_count,
+                        .model_fallback_count = state.model_fallback_count,
+                        .tool_loop_warning_count = state.tool_loop_warning_count,
+                        .tool_loop_breaker_count = state.tool_loop_breaker_count,
+                    },
+                };
+                bus.emit(&evt);
+            }
+        }
         writeStateFile(allocator, state_path, state) catch {};
         health.markComponentOk("heartbeat");
-        std.Thread.sleep(STATUS_FLUSH_SECONDS * std.time.ns_per_s);
+        std.Thread.sleep(flush_interval_secs * std.time.ns_per_s);
     }
 }
 
@@ -192,6 +236,59 @@ const InboundDispatchStats = struct {
     enqueued_outbound: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     process_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     publish_errors: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+};
+
+const FeedbackCounters = struct {
+    turn_complete: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    model_fallback: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    tool_loop_warning: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    tool_loop_breaker: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_critical_event_unix: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+};
+
+const FeedbackSubscriber = struct {
+    allocator: std.mem.Allocator,
+    counters: *FeedbackCounters,
+    event_bus: *bus_mod.Bus,
+    notify_channel: ?[]const u8 = null,
+    notify_target: ?[]const u8 = null,
+    notify_on_critical: bool = true,
+
+    fn publishCritical(self: *FeedbackSubscriber, text: []const u8) void {
+        if (!self.notify_on_critical) return;
+        const channel = self.notify_channel orelse return;
+        const target = self.notify_target orelse return;
+
+        const outbound = bus_mod.makeOutbound(self.allocator, channel, target, text) catch return;
+        self.event_bus.publishOutbound(outbound) catch {
+            outbound.deinit(self.allocator);
+            return;
+        };
+    }
+
+    fn onEvent(ctx_ptr: *anyopaque, event: *const hooks_mod.HookEvent) void {
+        const self: *FeedbackSubscriber = @ptrCast(@alignCast(ctx_ptr));
+        switch (event.*) {
+            .turn_complete => {
+                _ = self.counters.turn_complete.fetchAdd(1, .monotonic);
+            },
+            .model_fallback => {
+                const current = self.counters.model_fallback.fetchAdd(1, .monotonic) + 1;
+                if (current % 3 == 0) {
+                    self.publishCritical("daemon: model fallback repeated");
+                }
+            },
+            .tool_loop_warning => {
+                _ = self.counters.tool_loop_warning.fetchAdd(1, .monotonic);
+            },
+            .tool_loop_breaker => {
+                _ = self.counters.tool_loop_breaker.fetchAdd(1, .monotonic);
+                self.counters.last_critical_event_unix.store(std.time.timestamp(), .release);
+                self.publishCritical("daemon: tool loop breaker triggered");
+            },
+            else => {},
+        }
+    }
 };
 
 const ChannelRuntimeProcessorCtx = struct {
@@ -514,6 +611,33 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         }
     };
 
+    // Event bus (created early so daemon feedback can publish outbound notices)
+    var event_bus = bus_mod.Bus.init();
+
+    // Internal hook bus for agent lifecycle events (turn_complete/model_fallback/tool_loop*)
+    var hook_bus = hooks_mod.HookBus.init(allocator);
+    defer hook_bus.deinit();
+
+    var feedback_counters = FeedbackCounters{};
+    var feedback_subscriber = FeedbackSubscriber{
+        .allocator = allocator,
+        .counters = &feedback_counters,
+        .event_bus = &event_bus,
+        .notify_channel = config.daemon.feedback.notify_channel,
+        .notify_target = config.daemon.feedback.notify_target,
+        .notify_on_critical = config.daemon.feedback.notify_on_critical,
+    };
+    if (config.daemon.feedback.enabled) {
+        _ = hook_bus.subscribe(null, FeedbackSubscriber.onEvent, @ptrCast(&feedback_subscriber)) catch {};
+    }
+
+    const feedback_ptr: ?*const FeedbackCounters = if (config.daemon.feedback.enabled) &feedback_counters else null;
+    const hook_bus_ptr: ?*hooks_mod.HookBus = if (config.daemon.feedback.enabled) &hook_bus else null;
+    const flush_interval_secs: u64 = if (config.daemon.feedback.enabled and config.daemon.feedback.emit_interval_secs > 0)
+        config.daemon.feedback.emit_interval_secs
+    else
+        STATUS_FLUSH_SECONDS;
+
     // Spawn gateway thread
     state.markRunning("gateway");
     const gw_thread = std.Thread.spawn(.{ .stack_size = 256 * 1024 }, gatewayThread, .{ allocator, host, port, &state }) catch |err| {
@@ -530,7 +654,11 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     var hb_thread: ?std.Thread = null;
     if (config.heartbeat.enabled) {
         state.markRunning("heartbeat");
-        if (std.Thread.spawn(.{ .stack_size = 128 * 1024 }, heartbeatThread, .{ allocator, config, &state })) |thread| {
+        if (std.Thread.spawn(
+            .{ .stack_size = 128 * 1024 },
+            heartbeatThread,
+            .{ allocator, config, &state, feedback_ptr, hook_bus_ptr, flush_interval_secs },
+        )) |thread| {
             hb_thread = thread;
         } else |err| {
             state.markError("heartbeat", @errorName(err));
@@ -541,9 +669,6 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
             }
         }
     }
-
-    // Event bus (created before scheduler so cron jobs can deliver via bus)
-    var event_bus = bus_mod.Bus.init();
 
     // Spawn scheduler thread
     var sched_thread: ?std.Thread = null;
@@ -568,7 +693,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
     // Channel runtime for supervised polling (provider, tools, sessions)
     var channel_rt: ?*channel_loop.ChannelRuntime = null;
     if (hasSupervisedChannels(config)) {
-        channel_rt = channel_loop.ChannelRuntime.init(allocator, config, &event_bus) catch |err| blk: {
+        channel_rt = channel_loop.ChannelRuntime.init(allocator, config, &event_bus, hook_bus_ptr) catch |err| blk: {
             if (zh) {
                 stdout.print("警告: 频道运行时初始化失败: {}\n", .{err}) catch {};
             } else {
@@ -830,6 +955,7 @@ test "writeStateFile produces valid content" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"status\": \"running\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "test-comp") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "127.0.0.1:8080") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"feedback\"") != null);
 }
 
 test "handleInboundMessage publishes outbound response" {

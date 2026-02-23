@@ -773,18 +773,22 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
             tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
                 .http_enabled = cfg.http_request.enabled,
                 .browser_enabled = cfg.browser.enabled,
+                .browser_config = cfg.browser,
                 .screenshot_enabled = true,
                 .agents = cfg.agents,
                 .fallback_api_key = resolved_api_key,
+                .max_model_fallback_hops = cfg.reliability.max_model_fallback_hops,
                 .subagent_manager = &subagent_manager,
+                .tools_config = cfg.tools,
                 .security_config = cfg.security,
+                .plugins_config = cfg.plugins,
             }) catch &.{};
 
             // Noop observer.
             var noop_obs = observability.NoopObserver{};
             const obs = noop_obs.observer();
 
-            session_mgr_opt = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, obs);
+            session_mgr_opt = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, obs, null);
         }
     }
     if (state.pairing_guard == null) {

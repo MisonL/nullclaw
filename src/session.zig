@@ -20,6 +20,8 @@ const observability = @import("observability.zig");
 const Observer = observability.Observer;
 const tools_mod = @import("tools/root.zig");
 const Tool = tools_mod.Tool;
+const hooks_mod = @import("hooks.zig");
+const HookBus = hooks_mod.HookBus;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Session
@@ -51,6 +53,7 @@ pub const SessionManager = struct {
     tools: []const Tool,
     mem: ?Memory,
     observer: Observer,
+    hooks_bus: ?*HookBus = null,
 
     mutex: std.Thread.Mutex,
     sessions: std.StringHashMapUnmanaged(*Session),
@@ -62,6 +65,7 @@ pub const SessionManager = struct {
         tools: []const Tool,
         mem: ?Memory,
         observer_i: Observer,
+        hooks_bus: ?*HookBus,
     ) SessionManager {
         return .{
             .allocator = allocator,
@@ -70,6 +74,7 @@ pub const SessionManager = struct {
             .tools = tools,
             .mem = mem,
             .observer = observer_i,
+            .hooks_bus = hooks_bus,
             .mutex = .{},
             .sessions = .{},
         };
@@ -117,6 +122,7 @@ pub const SessionManager = struct {
             .turn_count = 0,
             .mutex = .{},
         };
+        session.agent.setInternalHooks(self.hooks_bus);
 
         // Restore persisted conversation history from SQLite
         if (self.mem) |mem| {
@@ -177,6 +183,41 @@ pub const SessionManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.sessions.count();
+    }
+
+    /// Return owned copies of active session keys.
+    /// Caller owns each string and the outer slice.
+    pub fn listSessionKeys(self: *SessionManager, allocator: Allocator) ![]const []const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var list: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (list.items) |k| allocator.free(k);
+            list.deinit(allocator);
+        }
+
+        try list.ensureTotalCapacity(allocator, self.sessions.count());
+        var it = self.sessions.iterator();
+        while (it.next()) |entry| {
+            try list.append(allocator, try allocator.dupe(u8, entry.key_ptr.*));
+        }
+
+        return try list.toOwnedSlice(allocator);
+    }
+
+    /// Remove a session by key. Returns true if removed.
+    pub fn resetSession(self: *SessionManager, session_key: []const u8) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.sessions.fetchRemove(session_key)) |kv| {
+            const session = kv.value;
+            session.deinit(self.allocator);
+            self.allocator.destroy(session);
+            return true;
+        }
+        return false;
     }
 
     /// Evict sessions idle longer than max_idle_secs. Returns number evicted.
@@ -282,6 +323,7 @@ fn testSessionManager(allocator: Allocator, mock: *MockProvider, cfg: *const Con
         &.{},
         null,
         noop.observer(),
+        null,
     );
 }
 
@@ -632,4 +674,35 @@ test "session initial state includes last_consolidated" {
     try testing.expectEqual(@as(u64, 0), s.turn_count);
     try testing.expect(s.created_at > 0);
     try testing.expect(s.last_active > 0);
+}
+
+test "listSessionKeys returns active keys" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    _ = try sm.getOrCreate("telegram:a");
+    _ = try sm.getOrCreate("discord:b");
+
+    const keys = try sm.listSessionKeys(testing.allocator);
+    defer {
+        for (keys) |k| testing.allocator.free(k);
+        testing.allocator.free(keys);
+    }
+
+    try testing.expectEqual(@as(usize, 2), keys.len);
+}
+
+test "resetSession removes an existing session" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+    var sm = testSessionManager(testing.allocator, &mock, &cfg);
+    defer sm.deinit();
+
+    _ = try sm.getOrCreate("telegram:reset");
+    try testing.expectEqual(@as(usize, 1), sm.sessionCount());
+    try testing.expect(sm.resetSession("telegram:reset"));
+    try testing.expectEqual(@as(usize, 0), sm.sessionCount());
+    try testing.expect(!sm.resetSession("telegram:reset"));
 }

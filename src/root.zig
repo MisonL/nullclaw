@@ -25,6 +25,7 @@ pub const daemon = @import("daemon.zig");
 pub const channel_loop = @import("channel_loop.zig");
 pub const migration = @import("migration.zig");
 pub const hooks = @import("hooks.zig");
+pub const plugins = @import("plugins.zig");
 
 // Phase 2: Agent core
 pub const agent = @import("agent.zig");
@@ -50,6 +51,7 @@ pub const runtime = @import("runtime.zig");
 
 // Phase 4b: MCP (Model Context Protocol)
 pub const mcp = @import("mcp.zig");
+pub const mcp_server = @import("mcp_server.zig");
 pub const subagent = @import("subagent.zig");
 
 // Phase 4c: Auth

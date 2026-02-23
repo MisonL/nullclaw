@@ -18,6 +18,7 @@ const voice = @import("voice.zig");
 const health = @import("health.zig");
 const daemon = @import("daemon.zig");
 const bus_mod = @import("bus.zig");
+const hooks_mod = @import("hooks.zig");
 
 const log = std.log.scoped(.channel_loop);
 
@@ -86,7 +87,12 @@ pub const ChannelRuntime = struct {
     noop_obs: *observability.NoopObserver,
 
     /// Initialize the runtime from config — mirrors main.zig:702-786 setup.
-    pub fn init(allocator: std.mem.Allocator, config: *const Config, event_bus: ?*bus_mod.Bus) !*ChannelRuntime {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: *const Config,
+        event_bus: ?*bus_mod.Bus,
+        hook_bus: ?*hooks_mod.HookBus,
+    ) !*ChannelRuntime {
         var resolved_key_owned: ?[]u8 = null;
         const resolved_key: ?[]const u8 = blk: {
             if (config.defaultProviderKey()) |k| break :blk k;
@@ -177,13 +183,17 @@ pub const ChannelRuntime = struct {
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
             .browser_enabled = config.browser.enabled,
+            .browser_config = config.browser,
             .screenshot_enabled = true,
             .mcp_tools = mcp_tools,
             .agents = config.agents,
             .fallback_api_key = resolved_key,
+            .max_model_fallback_hops = config.reliability.max_model_fallback_hops,
             .subagent_manager = subagent_mgr,
             .tools_config = config.tools,
             .security_config = config.security,
+            .plugins_config = config.plugins,
+            .hooks_bus = hook_bus,
         }) catch &.{};
         errdefer if (tools.len > 0) allocator.free(tools);
 
@@ -204,7 +214,7 @@ pub const ChannelRuntime = struct {
         const obs = noop_obs.observer();
 
         // Session manager
-        const session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs);
+        const session_mgr = session_mod.SessionManager.init(allocator, config, provider_i, tools, mem_opt, obs, hook_bus);
 
         // Self — heap-allocated so pointers remain stable
         const self = try allocator.create(ChannelRuntime);
