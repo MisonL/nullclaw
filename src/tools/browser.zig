@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("root.zig");
+const browser_cdp = @import("../browser_cdp.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
@@ -14,6 +15,13 @@ const MAX_FETCH_BYTES: usize = 65536;
 /// Supports "open" (launch URL), "read" (fetch body via curl), and returns
 /// informative errors for CDP-only actions (click, type, scroll, screenshot).
 pub const BrowserTool = struct {
+    workspace_dir: []const u8 = ".",
+    cdp_enabled: bool = false,
+    cdp_endpoint: []const u8 = "http://127.0.0.1:9222",
+    cdp_connect_timeout_ms: u64 = 3000,
+    cdp_action_timeout_ms: u64 = 10_000,
+    cdp_allow_remote: bool = false,
+
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
         .name = &vtableName,
@@ -43,24 +51,74 @@ pub const BrowserTool = struct {
 
     fn vtableParams(_: *anyopaque) []const u8 {
         return 
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["open","screenshot","click","type","scroll","read"],"description":"Browser action to perform"},"url":{"type":"string","description":"URL to open"},"selector":{"type":"string","description":"CSS selector for click/type"},"text":{"type":"string","description":"Text to type"}},"required":["action"]}
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["open","screenshot","click","type","scroll","read"],"description":"Browser action to perform"},"url":{"type":"string","description":"URL to open"},"selector":{"type":"string","description":"CSS selector for click/type/scroll"},"text":{"type":"string","description":"Text to type"},"x":{"type":"integer","description":"Horizontal scroll delta for scroll action (default: 0)"},"y":{"type":"integer","description":"Vertical scroll delta for scroll action (default: 600)"},"filename":{"type":"string","description":"Output filename for screenshot action"}},"required":["action"]}
         ;
     }
 
-    fn execute(_: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    fn execute(self: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const action = root.getString(args, "action") orelse
             return ToolResult.fail("Missing 'action' parameter");
 
         if (std.mem.eql(u8, action, "open")) {
+            if (self.cdp_enabled) {
+                const cdp_res = browser_cdp.performAction(
+                    allocator,
+                    .{
+                        .enabled = self.cdp_enabled,
+                        .endpoint = self.cdp_endpoint,
+                        .connect_timeout_ms = self.cdp_connect_timeout_ms,
+                        .action_timeout_ms = self.cdp_action_timeout_ms,
+                        .allow_remote = self.cdp_allow_remote,
+                    },
+                    self.workspace_dir,
+                    action,
+                    args,
+                ) catch null;
+                if (cdp_res) |res| if (res.success) return res;
+            }
             return executeOpen(allocator, args);
         } else if (std.mem.eql(u8, action, "read")) {
+            if (self.cdp_enabled) {
+                const cdp_res = browser_cdp.performAction(
+                    allocator,
+                    .{
+                        .enabled = self.cdp_enabled,
+                        .endpoint = self.cdp_endpoint,
+                        .connect_timeout_ms = self.cdp_connect_timeout_ms,
+                        .action_timeout_ms = self.cdp_action_timeout_ms,
+                        .allow_remote = self.cdp_allow_remote,
+                    },
+                    self.workspace_dir,
+                    action,
+                    args,
+                ) catch null;
+                if (cdp_res) |res| if (res.success) return res;
+            }
             return executeRead(allocator, args);
-        } else if (std.mem.eql(u8, action, "screenshot")) {
-            return ToolResult.fail("Use the screenshot tool instead");
         } else if (std.mem.eql(u8, action, "click") or
             std.mem.eql(u8, action, "type") or
-            std.mem.eql(u8, action, "scroll"))
+            std.mem.eql(u8, action, "scroll") or
+            std.mem.eql(u8, action, "screenshot"))
         {
+            if (self.cdp_enabled) {
+                return browser_cdp.performAction(
+                    allocator,
+                    .{
+                        .enabled = self.cdp_enabled,
+                        .endpoint = self.cdp_endpoint,
+                        .connect_timeout_ms = self.cdp_connect_timeout_ms,
+                        .action_timeout_ms = self.cdp_action_timeout_ms,
+                        .allow_remote = self.cdp_allow_remote,
+                    },
+                    self.workspace_dir,
+                    action,
+                    args,
+                );
+            }
+
+            if (std.mem.eql(u8, action, "screenshot")) {
+                return ToolResult.fail("Use the screenshot tool instead");
+            }
             const msg = try std.fmt.allocPrint(
                 allocator,
                 "Browser action '{s}' requires CDP (Chrome DevTools Protocol) which is not available. Use 'open' to launch in system browser or 'read' to fetch page content.",
