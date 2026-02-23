@@ -67,7 +67,16 @@ pub fn build(b: *std.Build) void {
 
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
 
+    const run_lib_tests = b.addRunArtifact(lib_tests);
+    const run_exe_tests = b.addRunArtifact(exe_tests);
+
+    const test_lib_step = b.step("test-lib", "Run library tests (src/root.zig)");
+    test_lib_step.dependOn(&run_lib_tests.step);
+
+    const test_exe_step = b.step("test-exe", "Run executable tests (src/main.zig)");
+    test_exe_step.dependOn(&run_exe_tests.step);
+
     const test_step = b.step("test", "Run all tests");
-    test_step.dependOn(&b.addRunArtifact(lib_tests).step);
-    test_step.dependOn(&b.addRunArtifact(exe_tests).step);
+    test_step.dependOn(&run_lib_tests.step);
+    test_step.dependOn(&run_exe_tests.step);
 }
