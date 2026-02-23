@@ -51,6 +51,10 @@ pub const DaemonState = struct {
     model_fallback_count: u64 = 0,
     tool_loop_warning_count: u64 = 0,
     tool_loop_breaker_count: u64 = 0,
+    turn_complete_recent_5m: u64 = 0,
+    model_fallback_recent_5m: u64 = 0,
+    tool_loop_warning_recent_5m: u64 = 0,
+    tool_loop_breaker_recent_5m: u64 = 0,
     last_critical_event_unix: i64 = 0,
 
     pub fn addComponent(self: *DaemonState, name: []const u8) void {
@@ -117,12 +121,16 @@ pub fn writeStateFile(allocator: std.mem.Allocator, path: []const u8, state: *co
     try buf.appendSlice(allocator, "\n  ],\n");
     try std.fmt.format(
         buf.writer(allocator),
-        "  \"feedback\": {{\"turn_complete\": {d}, \"model_fallback\": {d}, \"tool_loop_warning\": {d}, \"tool_loop_breaker\": {d}, \"last_critical_event_unix\": {d}}}\n",
+        "  \"feedback\": {{\"turn_complete\": {d}, \"model_fallback\": {d}, \"tool_loop_warning\": {d}, \"tool_loop_breaker\": {d}, \"recent_5m\": {{\"turn_complete\": {d}, \"model_fallback\": {d}, \"tool_loop_warning\": {d}, \"tool_loop_breaker\": {d}}}, \"last_critical_event_unix\": {d}}}\n",
         .{
             state.turn_complete_count,
             state.model_fallback_count,
             state.tool_loop_warning_count,
             state.tool_loop_breaker_count,
+            state.turn_complete_recent_5m,
+            state.model_fallback_recent_5m,
+            state.tool_loop_warning_recent_5m,
+            state.tool_loop_breaker_recent_5m,
             state.last_critical_event_unix,
         },
     );
@@ -178,6 +186,7 @@ fn heartbeatThread(
     config: *const Config,
     state: *DaemonState,
     feedback: ?*const FeedbackCounters,
+    feedback_subscriber: ?*FeedbackSubscriber,
     hook_bus: ?*hooks_mod.HookBus,
     flush_interval_secs: u64,
 ) void {
@@ -191,6 +200,13 @@ fn heartbeatThread(
             state.tool_loop_warning_count = fb.tool_loop_warning.load(.acquire);
             state.tool_loop_breaker_count = fb.tool_loop_breaker.load(.acquire);
             state.last_critical_event_unix = fb.last_critical_event_unix.load(.acquire);
+            if (feedback_subscriber) |sub| {
+                const recent = sub.snapshotRecentCounts();
+                state.turn_complete_recent_5m = recent.turn_complete;
+                state.model_fallback_recent_5m = recent.model_fallback;
+                state.tool_loop_warning_recent_5m = recent.tool_loop_warning;
+                state.tool_loop_breaker_recent_5m = recent.tool_loop_breaker;
+            }
 
             if (hook_bus) |bus| {
                 var evt: hooks_mod.HookEvent = .{
@@ -246,6 +262,44 @@ const FeedbackCounters = struct {
     last_critical_event_unix: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
 };
 
+const ROLLING_WINDOW_SECS: i64 = 5 * 60;
+
+const RollingEventWindow = struct {
+    timestamps: std.ArrayListUnmanaged(i64) = .empty,
+
+    fn deinit(self: *RollingEventWindow, allocator: std.mem.Allocator) void {
+        self.timestamps.deinit(allocator);
+    }
+
+    fn addNow(self: *RollingEventWindow, allocator: std.mem.Allocator, now_unix: i64) void {
+        self.timestamps.append(allocator, now_unix) catch {};
+    }
+
+    fn prune(self: *RollingEventWindow, now_unix: i64, window_secs: i64) void {
+        const cutoff = now_unix - window_secs;
+        var drop_count: usize = 0;
+        while (drop_count < self.timestamps.items.len and self.timestamps.items[drop_count] < cutoff) {
+            drop_count += 1;
+        }
+        if (drop_count == 0) return;
+        const remain = self.timestamps.items.len - drop_count;
+        std.mem.copyForwards(i64, self.timestamps.items[0..remain], self.timestamps.items[drop_count..]);
+        self.timestamps.items.len = remain;
+    }
+
+    fn countRecent(self: *RollingEventWindow, now_unix: i64, window_secs: i64) u64 {
+        self.prune(now_unix, window_secs);
+        return @intCast(self.timestamps.items.len);
+    }
+};
+
+const RecentFeedbackCounts = struct {
+    turn_complete: u64 = 0,
+    model_fallback: u64 = 0,
+    tool_loop_warning: u64 = 0,
+    tool_loop_breaker: u64 = 0,
+};
+
 const FeedbackSubscriber = struct {
     allocator: std.mem.Allocator,
     counters: *FeedbackCounters,
@@ -253,6 +307,32 @@ const FeedbackSubscriber = struct {
     notify_channel: ?[]const u8 = null,
     notify_target: ?[]const u8 = null,
     notify_on_critical: bool = true,
+    mutex: std.Thread.Mutex = .{},
+    turn_complete_window: RollingEventWindow = .{},
+    model_fallback_window: RollingEventWindow = .{},
+    tool_loop_warning_window: RollingEventWindow = .{},
+    tool_loop_breaker_window: RollingEventWindow = .{},
+
+    fn deinit(self: *FeedbackSubscriber) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.turn_complete_window.deinit(self.allocator);
+        self.model_fallback_window.deinit(self.allocator);
+        self.tool_loop_warning_window.deinit(self.allocator);
+        self.tool_loop_breaker_window.deinit(self.allocator);
+    }
+
+    fn snapshotRecentCounts(self: *FeedbackSubscriber) RecentFeedbackCounts {
+        const now_unix = std.time.timestamp();
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return .{
+            .turn_complete = self.turn_complete_window.countRecent(now_unix, ROLLING_WINDOW_SECS),
+            .model_fallback = self.model_fallback_window.countRecent(now_unix, ROLLING_WINDOW_SECS),
+            .tool_loop_warning = self.tool_loop_warning_window.countRecent(now_unix, ROLLING_WINDOW_SECS),
+            .tool_loop_breaker = self.tool_loop_breaker_window.countRecent(now_unix, ROLLING_WINDOW_SECS),
+        };
+    }
 
     fn publishCritical(self: *FeedbackSubscriber, text: []const u8) void {
         if (!self.notify_on_critical) return;
@@ -268,21 +348,29 @@ const FeedbackSubscriber = struct {
 
     fn onEvent(ctx_ptr: *anyopaque, event: *const hooks_mod.HookEvent) void {
         const self: *FeedbackSubscriber = @ptrCast(@alignCast(ctx_ptr));
+        const now_unix = std.time.timestamp();
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
         switch (event.*) {
             .turn_complete => {
                 _ = self.counters.turn_complete.fetchAdd(1, .monotonic);
+                self.turn_complete_window.addNow(self.allocator, now_unix);
             },
             .model_fallback => {
                 const current = self.counters.model_fallback.fetchAdd(1, .monotonic) + 1;
+                self.model_fallback_window.addNow(self.allocator, now_unix);
                 if (current % 3 == 0) {
                     self.publishCritical("daemon: model fallback repeated");
                 }
             },
             .tool_loop_warning => {
                 _ = self.counters.tool_loop_warning.fetchAdd(1, .monotonic);
+                self.tool_loop_warning_window.addNow(self.allocator, now_unix);
             },
             .tool_loop_breaker => {
                 _ = self.counters.tool_loop_breaker.fetchAdd(1, .monotonic);
+                self.tool_loop_breaker_window.addNow(self.allocator, now_unix);
                 self.counters.last_critical_event_unix.store(std.time.timestamp(), .release);
                 self.publishCritical("daemon: tool loop breaker triggered");
             },
@@ -627,11 +715,13 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         .notify_target = config.daemon.feedback.notify_target,
         .notify_on_critical = config.daemon.feedback.notify_on_critical,
     };
+    defer feedback_subscriber.deinit();
     if (config.daemon.feedback.enabled) {
         _ = hook_bus.subscribe(null, FeedbackSubscriber.onEvent, @ptrCast(&feedback_subscriber)) catch {};
     }
 
     const feedback_ptr: ?*const FeedbackCounters = if (config.daemon.feedback.enabled) &feedback_counters else null;
+    const feedback_subscriber_ptr: ?*FeedbackSubscriber = if (config.daemon.feedback.enabled) &feedback_subscriber else null;
     const hook_bus_ptr: ?*hooks_mod.HookBus = if (config.daemon.feedback.enabled) &hook_bus else null;
     const flush_interval_secs: u64 = if (config.daemon.feedback.enabled and config.daemon.feedback.emit_interval_secs > 0)
         config.daemon.feedback.emit_interval_secs
@@ -657,7 +747,7 @@ pub fn run(allocator: std.mem.Allocator, config: *const Config, host: []const u8
         if (std.Thread.spawn(
             .{ .stack_size = 128 * 1024 },
             heartbeatThread,
-            .{ allocator, config, &state, feedback_ptr, hook_bus_ptr, flush_interval_secs },
+            .{ allocator, config, &state, feedback_ptr, feedback_subscriber_ptr, hook_bus_ptr, flush_interval_secs },
         )) |thread| {
             hb_thread = thread;
         } else |err| {
@@ -956,6 +1046,19 @@ test "writeStateFile produces valid content" {
     try std.testing.expect(std.mem.indexOf(u8, content, "test-comp") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "127.0.0.1:8080") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"feedback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"recent_5m\"") != null);
+}
+
+test "RollingEventWindow prunes entries older than window" {
+    var window = RollingEventWindow{};
+    defer window.deinit(std.testing.allocator);
+
+    try window.timestamps.appendSlice(std.testing.allocator, &.{ 100, 200, 700, 900 });
+    const count = window.countRecent(1000, 300); // keep >= 700
+    try std.testing.expectEqual(@as(u64, 2), count);
+    try std.testing.expectEqual(@as(usize, 2), window.timestamps.items.len);
+    try std.testing.expectEqual(@as(i64, 700), window.timestamps.items[0]);
+    try std.testing.expectEqual(@as(i64, 900), window.timestamps.items[1]);
 }
 
 test "handleInboundMessage publishes outbound response" {

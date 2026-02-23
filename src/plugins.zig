@@ -53,7 +53,10 @@ pub const PluginTool = struct {
     description_text: []const u8,
     parameters_schema: []const u8,
     module_path: []const u8,
+    workspace_dir: []const u8,
     exec_timeout_ms: u64,
+    allow_network: bool,
+    allow_workspace_write: bool,
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -90,17 +93,36 @@ pub const PluginTool = struct {
     }
 
     fn execute(self: *PluginTool, allocator: std.mem.Allocator, _: JsonObjectMap) !ToolResult {
+        if (self.allow_network) {
+            const msg = try allocator.dupe(u8, "plugin network access is not supported by current runtime");
+            return .{ .success = false, .output = "", .error_msg = msg };
+        }
+
         if (builtin.is_test) {
             const msg = try std.fmt.allocPrint(allocator, "plugin tool executed: {s}", .{self.full_name});
             return .{ .success = true, .output = msg };
         }
 
-        var child = std.process.Child.init(&.{ "wasmtime", "run", self.module_path }, allocator);
+        var argv = try buildWasmtimeArgv(
+            allocator,
+            self.module_path,
+            self.workspace_dir,
+            self.allow_workspace_write,
+            null,
+        );
+        defer argv.deinit(allocator);
+
+        var child = std.process.Child.init(argv.args.items, allocator);
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
 
         child.spawn() catch |err| {
             const msg = try std.fmt.allocPrint(allocator, "plugin spawn failed: {s}", .{@errorName(err)});
+            return .{ .success = false, .output = "", .error_msg = msg };
+        };
+
+        const wait_result = waitForChildWithTimeout(allocator, &child, self.exec_timeout_ms) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "plugin wait failed: {s}", .{@errorName(err)});
             return .{ .success = false, .output = "", .error_msg = msg };
         };
 
@@ -113,10 +135,13 @@ pub const PluginTool = struct {
         const stderr = child.stderr.?.readToEndAlloc(allocator, max_bytes) catch "";
         defer if (stderr.len > 0) allocator.free(stderr);
 
-        const term = child.wait() catch |err| {
-            const msg = try std.fmt.allocPrint(allocator, "plugin wait failed: {s}", .{@errorName(err)});
+        const term = wait_result.term;
+
+        if (wait_result.timed_out) {
+            allocator.free(stdout);
+            const msg = try std.fmt.allocPrint(allocator, "plugin execution timed out after {d}ms", .{self.exec_timeout_ms});
             return .{ .success = false, .output = "", .error_msg = msg };
-        };
+        }
 
         switch (term) {
             .Exited => |code| {
@@ -322,6 +347,94 @@ fn fileSize(path: []const u8) !u64 {
     return stat.size;
 }
 
+const WasmtimeArgv = struct {
+    args: std.ArrayListUnmanaged([]const u8) = .empty,
+    owned: std.ArrayListUnmanaged([]u8) = .empty,
+
+    fn deinit(self: *WasmtimeArgv, allocator: std.mem.Allocator) void {
+        for (self.owned.items) |item| allocator.free(item);
+        self.owned.deinit(allocator);
+        self.args.deinit(allocator);
+    }
+};
+
+fn buildWasmtimeArgv(
+    allocator: std.mem.Allocator,
+    module_path: []const u8,
+    workspace_dir: []const u8,
+    allow_workspace_write: bool,
+    event_name: ?[]const u8,
+) !WasmtimeArgv {
+    var out = WasmtimeArgv{};
+    errdefer out.deinit(allocator);
+
+    try out.args.appendSlice(allocator, &.{ "wasmtime", "run" });
+    if (allow_workspace_write) {
+        const dir_flag = try std.fmt.allocPrint(allocator, "--dir={s}", .{workspace_dir});
+        try out.owned.append(allocator, dir_flag);
+        try out.args.append(allocator, dir_flag);
+    }
+    try out.args.append(allocator, module_path);
+    if (event_name) |evt| {
+        try out.args.appendSlice(allocator, &.{ "--", evt });
+    }
+
+    return out;
+}
+
+const WaitThreadCtx = struct {
+    child: *std.process.Child,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    wait_err: ?anyerror = null,
+    term: ?std.process.Child.Term = null,
+
+    fn run(ctx: *WaitThreadCtx) void {
+        ctx.term = ctx.child.wait() catch |err| {
+            ctx.wait_err = err;
+            ctx.done.store(true, .release);
+            return;
+        };
+        ctx.done.store(true, .release);
+    }
+};
+
+const WaitWithTimeoutResult = struct {
+    term: std.process.Child.Term,
+    timed_out: bool,
+};
+
+fn waitForChildWithTimeout(
+    allocator: std.mem.Allocator,
+    child: *std.process.Child,
+    timeout_ms: u64,
+) !WaitWithTimeoutResult {
+    _ = allocator;
+    var ctx = WaitThreadCtx{ .child = child };
+    const waiter = try std.Thread.spawn(.{ .stack_size = 128 * 1024 }, WaitThreadCtx.run, .{&ctx});
+
+    var timed_out = false;
+    if (timeout_ms > 0) {
+        const deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        while (!ctx.done.load(.acquire)) {
+            if (std.time.milliTimestamp() >= deadline) {
+                timed_out = true;
+                _ = child.kill() catch {};
+                break;
+            }
+            std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+    }
+
+    waiter.join();
+
+    if (ctx.wait_err) |err| return err;
+    if (ctx.term == null) return error.PluginWaitNoTerm;
+    return .{
+        .term = ctx.term.?,
+        .timed_out = timed_out,
+    };
+}
+
 fn toolNameExists(list: *std.ArrayList(Tool), name: []const u8) bool {
     for (list.items) |t| {
         if (std.mem.eql(u8, t.name(), name)) return true;
@@ -388,7 +501,10 @@ pub fn appendPluginTools(
                     .description_text = try allocator.dupe(u8, tool_def.description),
                     .parameters_schema = try allocator.dupe(u8, tool_def.parameters_json),
                     .module_path = try allocator.dupe(u8, module_path),
+                    .workspace_dir = workspace_dir,
                     .exec_timeout_ms = cfg.exec_timeout_ms,
+                    .allow_network = cfg.allow_network,
+                    .allow_workspace_write = cfg.allow_workspace_write,
                 };
                 try tool_list.append(allocator, pt.tool());
             }
@@ -462,6 +578,7 @@ const HookObserverTask = struct {
             var manifest = parseManifest(allocator, manifest_path) catch continue;
             defer manifest.deinit(allocator);
             if (!manifest.has_hook_observer) continue;
+            if (ctx.cfg.allow_network) continue;
 
             const module_path = pluginModulePath(allocator, manifest_path, manifest.entry) catch continue;
             defer allocator.free(module_path);
@@ -469,19 +586,29 @@ const HookObserverTask = struct {
             if (module_size > ctx.cfg.max_wasm_bytes) continue;
             if (builtin.is_test) continue;
 
-            var child = std.process.Child.init(
-                &.{ "wasmtime", "run", module_path, "--", ctx.event_name },
+            var argv = buildWasmtimeArgv(
                 allocator,
-            );
+                module_path,
+                ctx.workspace_dir,
+                ctx.cfg.allow_workspace_write,
+                ctx.event_name,
+            ) catch continue;
+            defer argv.deinit(allocator);
+
+            var child = std.process.Child.init(argv.args.items, allocator);
             child.stdout_behavior = .Pipe;
             child.stderr_behavior = .Pipe;
             child.spawn() catch continue;
+
+            _ = waitForChildWithTimeout(allocator, &child, ctx.cfg.exec_timeout_ms) catch {
+                _ = child.kill() catch {};
+                continue;
+            };
 
             const stdout_out = child.stdout.?.readToEndAlloc(allocator, 128 * 1024) catch "";
             defer if (stdout_out.len > 0) allocator.free(stdout_out);
             const stderr_out = child.stderr.?.readToEndAlloc(allocator, 128 * 1024) catch "";
             defer if (stderr_out.len > 0) allocator.free(stderr_out);
-            _ = child.wait() catch {};
         }
     }
 };
@@ -547,4 +674,48 @@ test "sanitizeToken keeps alnum and replaces separators" {
 test "notifyHookObserversAsync no-op when disabled" {
     var evt: hooks_mod.HookEvent = .{ .turn_complete = .{ .response_len = 1, .used_tools = false } };
     notifyHookObserversAsync(".", .{ .enabled = false }, &evt);
+}
+
+test "buildWasmtimeArgv adds workspace dir only when write allowed" {
+    var with_write = try buildWasmtimeArgv(
+        std.testing.allocator,
+        "/tmp/plugin.wasm",
+        "/tmp/workspace",
+        true,
+        null,
+    );
+    defer with_write.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), with_write.args.items.len);
+    try std.testing.expect(std.mem.eql(u8, with_write.args.items[2], "--dir=/tmp/workspace"));
+
+    var without_write = try buildWasmtimeArgv(
+        std.testing.allocator,
+        "/tmp/plugin.wasm",
+        "/tmp/workspace",
+        false,
+        null,
+    );
+    defer without_write.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), without_write.args.items.len);
+    try std.testing.expect(std.mem.eql(u8, without_write.args.items[2], "/tmp/plugin.wasm"));
+}
+
+test "plugin tool rejects allow_network policy" {
+    var tool = PluginTool{
+        .full_name = "plugin_test_tool",
+        .description_text = "desc",
+        .parameters_schema = "{}",
+        .module_path = "/tmp/plugin.wasm",
+        .workspace_dir = "/tmp/workspace",
+        .exec_timeout_ms = 100,
+        .allow_network = true,
+        .allow_workspace_write = false,
+    };
+    var args = std.json.ObjectMap.init(std.testing.allocator);
+    defer args.deinit();
+
+    const result = try tool.execute(std.testing.allocator, args);
+    defer if (result.error_msg) |msg| std.testing.allocator.free(msg);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(result.error_msg != null);
 }

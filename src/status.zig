@@ -48,6 +48,10 @@ const DaemonFeedbackSnapshot = struct {
     model_fallback: u64 = 0,
     tool_loop_warning: u64 = 0,
     tool_loop_breaker: u64 = 0,
+    turn_complete_recent_5m: u64 = 0,
+    model_fallback_recent_5m: u64 = 0,
+    tool_loop_warning_recent_5m: u64 = 0,
+    tool_loop_breaker_recent_5m: u64 = 0,
     last_critical_event_unix: i64 = 0,
 };
 
@@ -80,6 +84,22 @@ fn loadDaemonFeedback(allocator: std.mem.Allocator, cfg: *const Config) DaemonFe
     }
     if (feedback_val.object.get("tool_loop_breaker")) |v| {
         if (v == .integer) snap.tool_loop_breaker = @intCast(v.integer);
+    }
+    if (feedback_val.object.get("recent_5m")) |recent_val| {
+        if (recent_val == .object) {
+            if (recent_val.object.get("turn_complete")) |v| {
+                if (v == .integer) snap.turn_complete_recent_5m = @intCast(v.integer);
+            }
+            if (recent_val.object.get("model_fallback")) |v| {
+                if (v == .integer) snap.model_fallback_recent_5m = @intCast(v.integer);
+            }
+            if (recent_val.object.get("tool_loop_warning")) |v| {
+                if (v == .integer) snap.tool_loop_warning_recent_5m = @intCast(v.integer);
+            }
+            if (recent_val.object.get("tool_loop_breaker")) |v| {
+                if (v == .integer) snap.tool_loop_breaker_recent_5m = @intCast(v.integer);
+            }
+        }
     }
     if (feedback_val.object.get("last_critical_event_unix")) |v| {
         if (v == .integer) snap.last_critical_event_unix = @intCast(v.integer);
@@ -272,7 +292,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (daemon_feedback.found) {
         if (zh) {
             try w.print(
-                "守护反馈:    turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
+                "守护反馈(累计): turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
                 .{
                     daemon_feedback.turn_complete,
                     daemon_feedback.model_fallback,
@@ -280,17 +300,35 @@ pub fn run(allocator: std.mem.Allocator) !void {
                     daemon_feedback.tool_loop_breaker,
                 },
             );
+            try w.print(
+                "守护反馈(近5分钟): turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
+                .{
+                    daemon_feedback.turn_complete_recent_5m,
+                    daemon_feedback.model_fallback_recent_5m,
+                    daemon_feedback.tool_loop_warning_recent_5m,
+                    daemon_feedback.tool_loop_breaker_recent_5m,
+                },
+            );
             if (daemon_feedback.last_critical_event_unix > 0) {
                 try w.print("最近关键事件(Unix): {d}\n", .{daemon_feedback.last_critical_event_unix});
             }
         } else {
             try w.print(
-                "Daemon feedback: turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
+                "Daemon feedback (total): turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
                 .{
                     daemon_feedback.turn_complete,
                     daemon_feedback.model_fallback,
                     daemon_feedback.tool_loop_warning,
                     daemon_feedback.tool_loop_breaker,
+                },
+            );
+            try w.print(
+                "Daemon feedback (last 5m): turn_complete={d}, model_fallback={d}, tool_loop_warning={d}, tool_loop_breaker={d}\n",
+                .{
+                    daemon_feedback.turn_complete_recent_5m,
+                    daemon_feedback.model_fallback_recent_5m,
+                    daemon_feedback.tool_loop_warning_recent_5m,
+                    daemon_feedback.tool_loop_breaker_recent_5m,
                 },
             );
             if (daemon_feedback.last_critical_event_unix > 0) {
