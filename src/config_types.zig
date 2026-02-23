@@ -93,6 +93,8 @@ pub const ReliabilityConfig = struct {
     model_fallback_cooldown_secs: u64 = 120,
     model_probe_interval_secs: u64 = 30,
     probe_primary_during_cooldown: bool = true,
+    /// 0 = unlimited; otherwise limit fallback attempts (excluding primary model).
+    max_model_fallback_hops: u32 = 0,
     channel_initial_backoff_secs: u64 = 2,
     channel_max_backoff_secs: u64 = 60,
     scheduler_poll_secs: u64 = 15,
@@ -335,6 +337,11 @@ pub const BrowserConfig = struct {
     native_headless: bool = true,
     native_webdriver_url: []const u8 = "http://127.0.0.1:9515",
     native_chrome_path: ?[]const u8 = null,
+    cdp_enabled: bool = false,
+    cdp_endpoint: []const u8 = "http://127.0.0.1:9222",
+    cdp_connect_timeout_ms: u64 = 3000,
+    cdp_action_timeout_ms: u64 = 10_000,
+    cdp_allow_remote: bool = false,
     computer_use: BrowserComputerUseConfig = .{},
     allowed_domains: []const []const u8 = &.{},
 };
@@ -442,10 +449,22 @@ pub const NamedAgentConfig = struct {
     name: []const u8,
     provider: []const u8,
     model: []const u8,
+    /// Optional per-agent model fallback chain, tried in order after `model`.
+    fallback_models: []const []const u8 = &.{},
     system_prompt: ?[]const u8 = null,
     api_key: ?[]const u8 = null,
     temperature: ?f64 = null,
     max_depth: u32 = 3,
+};
+
+pub const PluginsConfig = struct {
+    enabled: bool = false,
+    dirs: []const []const u8 = &.{},
+    max_loaded: u32 = 8,
+    max_wasm_bytes: u32 = 2_097_152,
+    exec_timeout_ms: u64 = 1500,
+    allow_network: bool = false,
+    allow_workspace_write: bool = false,
 };
 
 // ── MCP Server Config ──────────────────────────────────────────
@@ -460,6 +479,24 @@ pub const McpServerConfig = struct {
         key: []const u8,
         value: []const u8,
     };
+};
+
+pub const McpServerRuntimeConfig = struct {
+    enabled: bool = false,
+    max_concurrent_requests: u32 = 4,
+    request_timeout_secs: u64 = 60,
+};
+
+pub const DaemonFeedbackConfig = struct {
+    enabled: bool = false,
+    emit_interval_secs: u64 = 5,
+    notify_channel: ?[]const u8 = null,
+    notify_target: ?[]const u8 = null,
+    notify_on_critical: bool = true,
+};
+
+pub const DaemonConfig = struct {
+    feedback: DaemonFeedbackConfig = .{},
 };
 
 // ── Model Pricing ──────────────────────────────────────────────

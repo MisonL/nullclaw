@@ -142,6 +142,11 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                                 .provider = try owned_alloc.dupe(u8, provider.string),
                                 .model = try owned_alloc.dupe(u8, model_str.?),
                             };
+                            if (item.object.get("fallback_models")) |fm| {
+                                if (fm == .array) {
+                                    agent_cfg.fallback_models = try parseStringArray(owned_alloc, fm.array);
+                                }
+                            }
                             if (item.object.get("system_prompt")) |sp| {
                                 if (sp == .string) agent_cfg.system_prompt = try owned_alloc.dupe(u8, sp.string);
                             }
@@ -160,6 +165,33 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                     }
                     self.agents = try list.toOwnedSlice(owned_alloc);
                 }
+            }
+        }
+    }
+
+    // Plugins
+    if (root.get("plugins")) |plugins_val| {
+        if (plugins_val == .object) {
+            if (plugins_val.object.get("enabled")) |v| {
+                if (v == .bool) self.plugins.enabled = v.bool;
+            }
+            if (plugins_val.object.get("dirs")) |v| {
+                if (v == .array) self.plugins.dirs = try parseStringArray(owned_alloc, v.array);
+            }
+            if (plugins_val.object.get("max_loaded")) |v| {
+                if (v == .integer) self.plugins.max_loaded = @intCast(v.integer);
+            }
+            if (plugins_val.object.get("max_wasm_bytes")) |v| {
+                if (v == .integer) self.plugins.max_wasm_bytes = @intCast(v.integer);
+            }
+            if (plugins_val.object.get("exec_timeout_ms")) |v| {
+                if (v == .integer) self.plugins.exec_timeout_ms = @intCast(v.integer);
+            }
+            if (plugins_val.object.get("allow_network")) |v| {
+                if (v == .bool) self.plugins.allow_network = v.bool;
+            }
+            if (plugins_val.object.get("allow_workspace_write")) |v| {
+                if (v == .bool) self.plugins.allow_workspace_write = v.bool;
             }
         }
     }
@@ -206,6 +238,21 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                 try mcp_list.append(owned_alloc, mcp_cfg);
             }
             self.mcp_servers = try mcp_list.toOwnedSlice(owned_alloc);
+        }
+    }
+
+    // MCP server runtime
+    if (root.get("mcp")) |mcp_rt| {
+        if (mcp_rt == .object) {
+            if (mcp_rt.object.get("enabled")) |v| {
+                if (v == .bool) self.mcp.enabled = v.bool;
+            }
+            if (mcp_rt.object.get("max_concurrent_requests")) |v| {
+                if (v == .integer) self.mcp.max_concurrent_requests = @intCast(v.integer);
+            }
+            if (mcp_rt.object.get("request_timeout_secs")) |v| {
+                if (v == .integer) self.mcp.request_timeout_secs = @intCast(v.integer);
+            }
         }
     }
 
@@ -314,6 +361,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (rel.object.get("probe_primary_during_cooldown")) |v| {
                 if (v == .bool) self.reliability.probe_primary_during_cooldown = v.bool;
+            }
+            if (rel.object.get("max_model_fallback_hops")) |v| {
+                if (v == .integer) self.reliability.max_model_fallback_hops = @intCast(v.integer);
             }
             if (rel.object.get("channel_initial_backoff_secs")) |v| {
                 if (v == .integer) self.reliability.channel_initial_backoff_secs = @intCast(v.integer);
@@ -649,11 +699,51 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             if (br.object.get("native_chrome_path")) |v| {
                 if (v == .string) self.browser.native_chrome_path = try owned_alloc.dupe(u8, v.string);
             }
+            if (br.object.get("cdp_enabled")) |v| {
+                if (v == .bool) self.browser.cdp_enabled = v.bool;
+            }
+            if (br.object.get("cdp_endpoint")) |v| {
+                if (v == .string) self.browser.cdp_endpoint = try owned_alloc.dupe(u8, v.string);
+            }
+            if (br.object.get("cdp_connect_timeout_ms")) |v| {
+                if (v == .integer) self.browser.cdp_connect_timeout_ms = @intCast(v.integer);
+            }
+            if (br.object.get("cdp_action_timeout_ms")) |v| {
+                if (v == .integer) self.browser.cdp_action_timeout_ms = @intCast(v.integer);
+            }
+            if (br.object.get("cdp_allow_remote")) |v| {
+                if (v == .bool) self.browser.cdp_allow_remote = v.bool;
+            }
             if (br.object.get("session_name")) |v| {
                 if (v == .string) self.browser.session_name = try owned_alloc.dupe(u8, v.string);
             }
             if (br.object.get("allowed_domains")) |v| {
                 if (v == .array) self.browser.allowed_domains = try parseStringArray(owned_alloc, v.array);
+            }
+        }
+    }
+
+    // Daemon
+    if (root.get("daemon")) |daemon_cfg| {
+        if (daemon_cfg == .object) {
+            if (daemon_cfg.object.get("feedback")) |fb| {
+                if (fb == .object) {
+                    if (fb.object.get("enabled")) |v| {
+                        if (v == .bool) self.daemon.feedback.enabled = v.bool;
+                    }
+                    if (fb.object.get("emit_interval_secs")) |v| {
+                        if (v == .integer) self.daemon.feedback.emit_interval_secs = @intCast(v.integer);
+                    }
+                    if (fb.object.get("notify_channel")) |v| {
+                        if (v == .string) self.daemon.feedback.notify_channel = try owned_alloc.dupe(u8, v.string);
+                    }
+                    if (fb.object.get("notify_target")) |v| {
+                        if (v == .string) self.daemon.feedback.notify_target = try owned_alloc.dupe(u8, v.string);
+                    }
+                    if (fb.object.get("notify_on_critical")) |v| {
+                        if (v == .bool) self.daemon.feedback.notify_on_critical = v.bool;
+                    }
+                }
             }
         }
     }

@@ -5,9 +5,14 @@ pub const HookEventKind = enum {
     agent_bootstrap,
     message_received,
     stream_fallback,
+    model_fallback,
     tool_loop_warning,
     tool_loop_breaker,
     turn_complete,
+    plugin_loaded,
+    plugin_error,
+    mcp_request,
+    daemon_feedback_tick,
 };
 
 pub const HookEvent = union(HookEventKind) {
@@ -25,6 +30,10 @@ pub const HookEvent = union(HookEventKind) {
     stream_fallback: struct {
         reason: []const u8,
     },
+    model_fallback: struct {
+        requested_model: []const u8,
+        active_model: []const u8,
+    },
     tool_loop_warning: struct {
         repeat_streak: u32,
         abab_streak: u32,
@@ -38,6 +47,24 @@ pub const HookEvent = union(HookEventKind) {
     turn_complete: struct {
         response_len: usize,
         used_tools: bool,
+    },
+    plugin_loaded: struct {
+        name: []const u8,
+        version: []const u8,
+    },
+    plugin_error: struct {
+        name: []const u8,
+        message: []const u8,
+    },
+    mcp_request: struct {
+        method: []const u8,
+        success: bool,
+    },
+    daemon_feedback_tick: struct {
+        turn_complete_count: u64,
+        model_fallback_count: u64,
+        tool_loop_warning_count: u64,
+        tool_loop_breaker_count: u64,
     },
 };
 

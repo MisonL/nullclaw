@@ -50,7 +50,11 @@ pub const AuditConfig = config_types.AuditConfig;
 pub const SecurityConfig = config_types.SecurityConfig;
 pub const DelegateAgentConfig = config_types.DelegateAgentConfig;
 pub const NamedAgentConfig = config_types.NamedAgentConfig;
+pub const PluginsConfig = config_types.PluginsConfig;
 pub const McpServerConfig = config_types.McpServerConfig;
+pub const McpServerRuntimeConfig = config_types.McpServerRuntimeConfig;
+pub const DaemonFeedbackConfig = config_types.DaemonFeedbackConfig;
+pub const DaemonConfig = config_types.DaemonConfig;
 pub const ModelPricing = config_types.ModelPricing;
 pub const ToolsConfig = config_types.ToolsConfig;
 pub const ProviderEntry = config_types.ProviderEntry;
@@ -78,7 +82,9 @@ pub const Config = struct {
     // Model routing and delegate agents
     model_routes: []const ModelRouteConfig = &.{},
     agents: []const NamedAgentConfig = &.{},
+    plugins: PluginsConfig = .{},
     mcp_servers: []const McpServerConfig = &.{},
+    mcp: McpServerRuntimeConfig = .{},
 
     // Nested sub-configs
     diagnostics: DiagnosticsConfig = .{},
@@ -102,6 +108,7 @@ pub const Config = struct {
     peripherals: PeripheralsConfig = .{},
     hardware: HardwareConfig = .{},
     security: SecurityConfig = .{},
+    daemon: DaemonConfig = .{},
     tools: ToolsConfig = .{},
 
     // Convenience aliases for backward-compat flat access used by other modules.
@@ -303,34 +310,123 @@ pub const Config = struct {
             try w.print("    }}\n  }},\n", .{});
         }
 
-        // agents.defaults (model + heartbeat)
+        // agents.defaults (model + heartbeat) and agents.list
         {
             const has_model = self.default_model != null;
             const has_heartbeat = self.heartbeat.enabled or self.heartbeat.interval_minutes != 30;
-            if (has_model or has_heartbeat) {
-                try w.print("  \"agents\": {{\n    \"defaults\": {{\n", .{});
-                if (self.default_model) |model| {
-                    try w.print("      \"model\": {{\"primary\": \"{s}\"}}", .{model});
-                    if (has_heartbeat) try w.print(",", .{});
-                    try w.print("\n", .{});
-                }
-                if (has_heartbeat) {
-                    try w.print("      \"heartbeat\": {{", .{});
-                    // Convert interval_minutes to "every" string
-                    const mins = self.heartbeat.interval_minutes;
-                    if (mins >= 60 and mins % 60 == 0) {
-                        try w.print("\"every\": \"{d}h\"", .{mins / 60});
-                    } else {
-                        try w.print("\"every\": \"{d}m\"", .{mins});
+            const has_defaults = has_model or has_heartbeat;
+            const has_list = self.agents.len > 0;
+            if (has_defaults or has_list) {
+                try w.print("  \"agents\": {{\n", .{});
+                var wrote_section = false;
+
+                if (has_defaults) {
+                    try w.print("    \"defaults\": {{\n", .{});
+                    if (self.default_model) |model| {
+                        try w.print("      \"model\": {{\"primary\": \"{s}\"}}", .{model});
+                        if (has_heartbeat) try w.print(",", .{});
+                        try w.print("\n", .{});
                     }
-                    if (!self.heartbeat.enabled) {
-                        try w.print(", \"enabled\": false", .{});
+                    if (has_heartbeat) {
+                        try w.print("      \"heartbeat\": {{", .{});
+                        // Convert interval_minutes to "every" string
+                        const mins = self.heartbeat.interval_minutes;
+                        if (mins >= 60 and mins % 60 == 0) {
+                            try w.print("\"every\": \"{d}h\"", .{mins / 60});
+                        } else {
+                            try w.print("\"every\": \"{d}m\"", .{mins});
+                        }
+                        if (!self.heartbeat.enabled) {
+                            try w.print(", \"enabled\": false", .{});
+                        }
+                        try w.print("}}\n", .{});
                     }
-                    try w.print("}}\n", .{});
+                    try w.print("    }}", .{});
+                    wrote_section = true;
                 }
-                try w.print("    }}\n  }},\n", .{});
+
+                if (has_list) {
+                    if (wrote_section) try w.print(",\n", .{}) else try w.print("\n", .{});
+                    try w.print("    \"list\": [\n", .{});
+                    for (self.agents, 0..) |agent_cfg, i| {
+                        try w.print("      {{\"name\": \"{s}\", \"provider\": \"{s}\", \"model\": \"{s}\"", .{
+                            agent_cfg.name,
+                            agent_cfg.provider,
+                            agent_cfg.model,
+                        });
+                        if (agent_cfg.fallback_models.len > 0) {
+                            try w.print(", \"fallback_models\": [", .{});
+                            for (agent_cfg.fallback_models, 0..) |fm, j| {
+                                if (j > 0) try w.print(", ", .{});
+                                try w.print("\"{s}\"", .{fm});
+                            }
+                            try w.print("]", .{});
+                        }
+                        if (agent_cfg.system_prompt) |sp| try w.print(", \"system_prompt\": \"{s}\"", .{sp});
+                        if (agent_cfg.api_key) |ak| try w.print(", \"api_key\": \"{s}\"", .{ak});
+                        if (agent_cfg.temperature) |temp| try w.print(", \"temperature\": {d}", .{temp});
+                        if (agent_cfg.max_depth != 3) try w.print(", \"max_depth\": {d}", .{agent_cfg.max_depth});
+                        try w.print("}}", .{});
+                        if (i + 1 < self.agents.len) try w.print(",", .{});
+                        try w.print("\n", .{});
+                    }
+                    try w.print("    ]", .{});
+                }
+
+                try w.print("\n  }},\n", .{});
             }
         }
+
+        // Plugins
+        try w.print("  \"plugins\": {{\n", .{});
+        try w.print("    \"enabled\": {s},\n", .{if (self.plugins.enabled) "true" else "false"});
+        try w.print("    \"dirs\": [", .{});
+        for (self.plugins.dirs, 0..) |dir_path, i| {
+            if (i > 0) try w.print(", ", .{});
+            try w.print("\"{s}\"", .{dir_path});
+        }
+        try w.print("],\n", .{});
+        try w.print("    \"max_loaded\": {d},\n", .{self.plugins.max_loaded});
+        try w.print("    \"max_wasm_bytes\": {d},\n", .{self.plugins.max_wasm_bytes});
+        try w.print("    \"exec_timeout_ms\": {d},\n", .{self.plugins.exec_timeout_ms});
+        try w.print("    \"allow_network\": {s},\n", .{if (self.plugins.allow_network) "true" else "false"});
+        try w.print("    \"allow_workspace_write\": {s}\n", .{if (self.plugins.allow_workspace_write) "true" else "false"});
+        try w.print("  }},\n", .{});
+
+        // MCP server command entries (client tools)
+        if (self.mcp_servers.len > 0) {
+            try w.print("  \"mcp_servers\": {{\n", .{});
+            for (self.mcp_servers, 0..) |server_cfg, i| {
+                try w.print("    \"{s}\": {{\"command\": \"{s}\"", .{ server_cfg.name, server_cfg.command });
+                if (server_cfg.args.len > 0) {
+                    try w.print(", \"args\": [", .{});
+                    for (server_cfg.args, 0..) |arg, j| {
+                        if (j > 0) try w.print(", ", .{});
+                        try w.print("\"{s}\"", .{arg});
+                    }
+                    try w.print("]", .{});
+                }
+                if (server_cfg.env.len > 0) {
+                    try w.print(", \"env\": {{", .{});
+                    for (server_cfg.env, 0..) |env_entry, j| {
+                        if (j > 0) try w.print(", ", .{});
+                        try w.print("\"{s}\": \"{s}\"", .{ env_entry.key, env_entry.value });
+                    }
+                    try w.print("}}", .{});
+                }
+                try w.print("}}", .{});
+                if (i + 1 < self.mcp_servers.len) try w.print(",", .{});
+                try w.print("\n", .{});
+            }
+            try w.print("  }},\n", .{});
+        }
+
+        // MCP server runtime
+        try w.print("  \"mcp\": {{\n", .{});
+        try w.print("    \"enabled\": {s},\n", .{if (self.mcp.enabled) "true" else "false"});
+        try w.print("    \"max_concurrent_requests\": {d},\n", .{self.mcp.max_concurrent_requests});
+        try w.print("    \"request_timeout_secs\": {d}\n", .{self.mcp.request_timeout_secs});
+        try w.print("  }},\n", .{});
 
         // Diagnostics (with nested otel)
         try w.print("  \"diagnostics\": {{\n", .{});
@@ -365,6 +461,32 @@ pub const Config = struct {
             try w.print("]\n", .{});
         } else {
             try w.print("    \"max_cost_per_day_cents\": {d}\n", .{self.autonomy.max_cost_per_day_cents});
+        }
+        try w.print("  }},\n", .{});
+
+        // Reliability
+        try w.print("  \"reliability\": {{\n", .{});
+        try w.print("    \"provider_retries\": {d},\n", .{self.reliability.provider_retries});
+        try w.print("    \"provider_backoff_ms\": {d},\n", .{self.reliability.provider_backoff_ms});
+        try w.print("    \"model_fallback_cooldown_secs\": {d},\n", .{self.reliability.model_fallback_cooldown_secs});
+        try w.print("    \"model_probe_interval_secs\": {d},\n", .{self.reliability.model_probe_interval_secs});
+        try w.print("    \"probe_primary_during_cooldown\": {s},\n", .{if (self.reliability.probe_primary_during_cooldown) "true" else "false"});
+        try w.print("    \"max_model_fallback_hops\": {d}", .{self.reliability.max_model_fallback_hops});
+        if (self.reliability.model_fallbacks.len > 0) {
+            try w.print(",\n    \"model_fallbacks\": [\n", .{});
+            for (self.reliability.model_fallbacks, 0..) |entry, i| {
+                try w.print("      {{\"model\": \"{s}\", \"fallbacks\": [", .{entry.model});
+                for (entry.fallbacks, 0..) |fb, j| {
+                    if (j > 0) try w.print(", ", .{});
+                    try w.print("\"{s}\"", .{fb});
+                }
+                try w.print("]}}", .{});
+                if (i + 1 < self.reliability.model_fallbacks.len) try w.print(",", .{});
+                try w.print("\n", .{});
+            }
+            try w.print("    ]\n", .{});
+        } else {
+            try w.print("\n", .{});
         }
         try w.print("  }},\n", .{});
 
@@ -440,6 +562,44 @@ pub const Config = struct {
             }
         }
         try w.print("\n  }},\n", .{});
+
+        // Browser
+        try w.print("  \"browser\": {{\n", .{});
+        try w.print("    \"enabled\": {s},\n", .{if (self.browser.enabled) "true" else "false"});
+        try w.print("    \"backend\": \"{s}\",\n", .{self.browser.backend});
+        try w.print("    \"native_headless\": {s},\n", .{if (self.browser.native_headless) "true" else "false"});
+        try w.print("    \"native_webdriver_url\": \"{s}\",\n", .{self.browser.native_webdriver_url});
+        try w.print("    \"cdp_enabled\": {s},\n", .{if (self.browser.cdp_enabled) "true" else "false"});
+        try w.print("    \"cdp_endpoint\": \"{s}\",\n", .{self.browser.cdp_endpoint});
+        try w.print("    \"cdp_connect_timeout_ms\": {d},\n", .{self.browser.cdp_connect_timeout_ms});
+        try w.print("    \"cdp_action_timeout_ms\": {d},\n", .{self.browser.cdp_action_timeout_ms});
+        try w.print("    \"cdp_allow_remote\": {s},\n", .{if (self.browser.cdp_allow_remote) "true" else "false"});
+        try w.print("    \"allowed_domains\": [", .{});
+        for (self.browser.allowed_domains, 0..) |domain, i| {
+            if (i > 0) try w.print(", ", .{});
+            try w.print("\"{s}\"", .{domain});
+        }
+        try w.print("]\n", .{});
+        try w.print("  }},\n", .{});
+
+        // Daemon
+        try w.print("  \"daemon\": {{\n", .{});
+        try w.print("    \"feedback\": {{\n", .{});
+        try w.print("      \"enabled\": {s},\n", .{if (self.daemon.feedback.enabled) "true" else "false"});
+        try w.print("      \"emit_interval_secs\": {d},\n", .{self.daemon.feedback.emit_interval_secs});
+        if (self.daemon.feedback.notify_channel) |channel| {
+            try w.print("      \"notify_channel\": \"{s}\",\n", .{channel});
+        } else {
+            try w.print("      \"notify_channel\": null,\n", .{});
+        }
+        if (self.daemon.feedback.notify_target) |target| {
+            try w.print("      \"notify_target\": \"{s}\",\n", .{target});
+        } else {
+            try w.print("      \"notify_target\": null,\n", .{});
+        }
+        try w.print("      \"notify_on_critical\": {s}\n", .{if (self.daemon.feedback.notify_on_critical) "true" else "false"});
+        try w.print("    }}\n", .{});
+        try w.print("  }},\n", .{});
 
         // Hardware
         try w.print("  \"hardware\": {{\n", .{});
@@ -770,7 +930,7 @@ test "json parse scheduler section" {
 test "json parse reliability cooldown and model fallback section" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"reliability":{"provider_retries":3,"provider_backoff_ms":750,"model_fallback_cooldown_secs":90,"model_probe_interval_secs":15,"probe_primary_during_cooldown":false,"model_fallbacks":[{"model":"gpt-4.1","fallbacks":["gpt-4.1-mini","gpt-4o-mini"]}]}}
+        \\{"reliability":{"provider_retries":3,"provider_backoff_ms":750,"model_fallback_cooldown_secs":90,"model_probe_interval_secs":15,"probe_primary_during_cooldown":false,"max_model_fallback_hops":2,"model_fallbacks":[{"model":"gpt-4.1","fallbacks":["gpt-4.1-mini","gpt-4o-mini"]}]}}
     ;
     var cfg = Config{
         .workspace_dir = "/tmp/yc",
@@ -786,6 +946,7 @@ test "json parse reliability cooldown and model fallback section" {
     try std.testing.expectEqual(@as(u64, 90), cfg.reliability.model_fallback_cooldown_secs);
     try std.testing.expectEqual(@as(u64, 15), cfg.reliability.model_probe_interval_secs);
     try std.testing.expect(!cfg.reliability.probe_primary_during_cooldown);
+    try std.testing.expectEqual(@as(u32, 2), cfg.reliability.max_model_fallback_hops);
     try std.testing.expectEqual(@as(usize, 1), cfg.reliability.model_fallbacks.len);
     try std.testing.expectEqualStrings("gpt-4.1", cfg.reliability.model_fallbacks[0].model);
     try std.testing.expectEqual(@as(usize, 2), cfg.reliability.model_fallbacks[0].fallbacks.len);
@@ -924,6 +1085,169 @@ test "save writes agent skills prompt limits" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skill_file_bytes\": 4096") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"max_candidates_per_root\": 33") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skills_loaded_per_source\": 8") != null);
+}
+
+test "save writes reliability max hops and agents fallback_models" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fs.path.join(allocator, &.{ base, "config.json" });
+    defer allocator.free(config_path);
+
+    const fallback_models = [_][]const u8{ "gpt-4.1-mini", "gpt-4o-mini" };
+    const agents = [_]NamedAgentConfig{
+        .{
+            .name = "planner",
+            .provider = "openai",
+            .model = "gpt-4.1",
+            .fallback_models = &fallback_models,
+        },
+    };
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+        .agents = &agents,
+    };
+    cfg.reliability.max_model_fallback_hops = 1;
+
+    try cfg.save();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 128 * 1024);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"reliability\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_model_fallback_hops\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"agents\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"fallback_models\": [\"gpt-4.1-mini\", \"gpt-4o-mini\"]") != null);
+}
+
+test "json parse plugins mcp runtime daemon feedback and browser cdp" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "plugins": {
+        \\    "enabled": true,
+        \\    "dirs": ["./plugins", "./.nullclaw/plugins"],
+        \\    "max_loaded": 3,
+        \\    "max_wasm_bytes": 4096,
+        \\    "exec_timeout_ms": 900,
+        \\    "allow_network": false,
+        \\    "allow_workspace_write": true
+        \\  },
+        \\  "mcp": {
+        \\    "enabled": true,
+        \\    "max_concurrent_requests": 2,
+        \\    "request_timeout_secs": 30
+        \\  },
+        \\  "daemon": {
+        \\    "feedback": {
+        \\      "enabled": true,
+        \\      "emit_interval_secs": 3,
+        \\      "notify_channel": "telegram",
+        \\      "notify_target": "12345",
+        \\      "notify_on_critical": false
+        \\    }
+        \\  },
+        \\  "browser": {
+        \\    "cdp_enabled": true,
+        \\    "cdp_endpoint": "http://127.0.0.1:9222",
+        \\    "cdp_connect_timeout_ms": 2500,
+        \\    "cdp_action_timeout_ms": 9000,
+        \\    "cdp_allow_remote": false
+        \\  }
+        \\}
+    ;
+
+    var cfg = Config{
+        .workspace_dir = "/tmp/yc",
+        .config_path = "/tmp/yc/config.json",
+        .allocator = allocator,
+        .arena = std.heap.ArenaAllocator.init(allocator),
+    };
+    defer cfg.deinit();
+    try cfg.parseJson(json);
+
+    try std.testing.expect(cfg.plugins.enabled);
+    try std.testing.expectEqual(@as(usize, 2), cfg.plugins.dirs.len);
+    try std.testing.expectEqual(@as(u32, 3), cfg.plugins.max_loaded);
+    try std.testing.expectEqual(@as(u32, 4096), cfg.plugins.max_wasm_bytes);
+    try std.testing.expectEqual(@as(u64, 900), cfg.plugins.exec_timeout_ms);
+    try std.testing.expect(!cfg.plugins.allow_network);
+    try std.testing.expect(cfg.plugins.allow_workspace_write);
+
+    try std.testing.expect(cfg.mcp.enabled);
+    try std.testing.expectEqual(@as(u32, 2), cfg.mcp.max_concurrent_requests);
+    try std.testing.expectEqual(@as(u64, 30), cfg.mcp.request_timeout_secs);
+
+    try std.testing.expect(cfg.daemon.feedback.enabled);
+    try std.testing.expectEqual(@as(u64, 3), cfg.daemon.feedback.emit_interval_secs);
+    try std.testing.expectEqualStrings("telegram", cfg.daemon.feedback.notify_channel.?);
+    try std.testing.expectEqualStrings("12345", cfg.daemon.feedback.notify_target.?);
+    try std.testing.expect(!cfg.daemon.feedback.notify_on_critical);
+
+    try std.testing.expect(cfg.browser.cdp_enabled);
+    try std.testing.expectEqualStrings("http://127.0.0.1:9222", cfg.browser.cdp_endpoint);
+    try std.testing.expectEqual(@as(u64, 2500), cfg.browser.cdp_connect_timeout_ms);
+    try std.testing.expectEqual(@as(u64, 9000), cfg.browser.cdp_action_timeout_ms);
+    try std.testing.expect(!cfg.browser.cdp_allow_remote);
+}
+
+test "save writes plugins mcp runtime and daemon feedback" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fs.path.join(allocator, &.{ base, "config.json" });
+    defer allocator.free(config_path);
+
+    const plugin_dirs = [_][]const u8{ "./plugins", "./extra-plugins" };
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.plugins.enabled = true;
+    cfg.plugins.dirs = &plugin_dirs;
+    cfg.plugins.max_loaded = 5;
+    cfg.plugins.max_wasm_bytes = 8192;
+    cfg.plugins.exec_timeout_ms = 1200;
+    cfg.plugins.allow_network = false;
+    cfg.plugins.allow_workspace_write = false;
+
+    cfg.mcp.enabled = true;
+    cfg.mcp.max_concurrent_requests = 3;
+    cfg.mcp.request_timeout_secs = 45;
+
+    cfg.daemon.feedback.enabled = true;
+    cfg.daemon.feedback.emit_interval_secs = 4;
+    cfg.daemon.feedback.notify_channel = "telegram";
+    cfg.daemon.feedback.notify_target = "chat-1";
+    cfg.daemon.feedback.notify_on_critical = true;
+
+    cfg.browser.cdp_enabled = true;
+    cfg.browser.cdp_endpoint = "http://127.0.0.1:9222";
+    cfg.browser.cdp_connect_timeout_ms = 3333;
+    cfg.browser.cdp_action_timeout_ms = 7777;
+    cfg.browser.cdp_allow_remote = false;
+
+    try cfg.save();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 128 * 1024);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"plugins\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_loaded\": 5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"mcp\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"max_concurrent_requests\": 3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"daemon\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"feedback\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"notify_channel\": \"telegram\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"cdp_enabled\": true") != null);
 }
 
 test "json parse empty object uses defaults" {
@@ -1086,9 +1410,36 @@ test "json parse agents" {
         allocator.free(a.name);
         allocator.free(a.provider);
         allocator.free(a.model);
+        if (a.fallback_models.len > 0) {
+            for (a.fallback_models) |fm| allocator.free(fm);
+            allocator.free(a.fallback_models);
+        }
         if (a.system_prompt) |sp| allocator.free(sp);
         if (a.api_key) |k| allocator.free(k);
     }
+    allocator.free(cfg.agents);
+}
+
+test "json parse agents with fallback_models" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"agents": {"list": [
+        \\  {"name": "planner", "provider": "openai", "model": "gpt-4.1", "fallback_models": ["gpt-4.1-mini", "gpt-4o-mini"]}
+        \\]}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqual(@as(usize, 1), cfg.agents.len);
+    try std.testing.expectEqualStrings("planner", cfg.agents[0].name);
+    try std.testing.expectEqual(@as(usize, 2), cfg.agents[0].fallback_models.len);
+    try std.testing.expectEqualStrings("gpt-4.1-mini", cfg.agents[0].fallback_models[0]);
+    try std.testing.expectEqualStrings("gpt-4o-mini", cfg.agents[0].fallback_models[1]);
+
+    allocator.free(cfg.agents[0].name);
+    allocator.free(cfg.agents[0].provider);
+    allocator.free(cfg.agents[0].model);
+    for (cfg.agents[0].fallback_models) |fm| allocator.free(fm);
+    allocator.free(cfg.agents[0].fallback_models);
     allocator.free(cfg.agents);
 }
 
@@ -1108,6 +1459,10 @@ test "json parse agents skips invalid entries" {
     allocator.free(cfg.agents[0].name);
     allocator.free(cfg.agents[0].provider);
     allocator.free(cfg.agents[0].model);
+    if (cfg.agents[0].fallback_models.len > 0) {
+        for (cfg.agents[0].fallback_models) |fm| allocator.free(fm);
+        allocator.free(cfg.agents[0].fallback_models);
+    }
     allocator.free(cfg.agents);
 }
 
@@ -1140,6 +1495,10 @@ test "json parse all new fields together" {
     allocator.free(cfg.agents[0].name);
     allocator.free(cfg.agents[0].provider);
     allocator.free(cfg.agents[0].model);
+    if (cfg.agents[0].fallback_models.len > 0) {
+        for (cfg.agents[0].fallback_models) |fm| allocator.free(fm);
+        allocator.free(cfg.agents[0].fallback_models);
+    }
     allocator.free(cfg.agents);
     allocator.free(cfg.autonomy.allowed_commands[0]);
     allocator.free(cfg.autonomy.allowed_commands);
@@ -1174,6 +1533,10 @@ test "parse agents.list with model object" {
     allocator.free(cfg.agents[0].name);
     allocator.free(cfg.agents[0].provider);
     allocator.free(cfg.agents[0].model);
+    if (cfg.agents[0].fallback_models.len > 0) {
+        for (cfg.agents[0].fallback_models) |fm| allocator.free(fm);
+        allocator.free(cfg.agents[0].fallback_models);
+    }
     allocator.free(cfg.agents);
 }
 
@@ -1189,6 +1552,10 @@ test "parse agents.list with id field" {
     allocator.free(cfg.agents[0].name);
     allocator.free(cfg.agents[0].provider);
     allocator.free(cfg.agents[0].model);
+    if (cfg.agents[0].fallback_models.len > 0) {
+        for (cfg.agents[0].fallback_models) |fm| allocator.free(fm);
+        allocator.free(cfg.agents[0].fallback_models);
+    }
     allocator.free(cfg.agents);
 }
 

@@ -7,6 +7,30 @@ const Config = @import("../config.zig").Config;
 const NamedAgentConfig = @import("../config.zig").NamedAgentConfig;
 const providers = @import("../providers/root.zig");
 
+const DelegateCompletionConfig = struct {
+    api_key: ?[]const u8,
+    default_provider: []const u8,
+    default_model: ?[]const u8,
+    temperature: f64,
+    max_tokens: ?u64,
+};
+
+const CompleteWithSystemFn = *const fn (
+    allocator: std.mem.Allocator,
+    cfg: *const DelegateCompletionConfig,
+    system_prompt: []const u8,
+    prompt: []const u8,
+) anyerror![]const u8;
+
+fn defaultCompleteWithSystem(
+    allocator: std.mem.Allocator,
+    cfg: *const DelegateCompletionConfig,
+    system_prompt: []const u8,
+    prompt: []const u8,
+) anyerror![]const u8 {
+    return providers.completeWithSystem(allocator, cfg, system_prompt, prompt);
+}
+
 /// Delegate tool — delegates a subtask to a named sub-agent with a different
 /// provider/model configuration. Supports depth enforcement to prevent
 /// infinite delegation chains.
@@ -15,8 +39,12 @@ pub const DelegateTool = struct {
     agents: []const NamedAgentConfig = &.{},
     /// Fallback API key if agent-specific key is not set.
     fallback_api_key: ?[]const u8 = null,
+    /// 0 = unlimited; otherwise cap fallback attempts per delegation.
+    max_model_fallback_hops: u32 = 0,
     /// Current delegation depth. Incremented for sub-delegates.
     depth: u32 = 0,
+    /// Injectable completion function for deterministic tests.
+    complete_with_system_fn: CompleteWithSystemFn = defaultCompleteWithSystem,
 
     const vtable = Tool.VTable{
         .execute = &vtableExecute,
@@ -104,24 +132,51 @@ pub const DelegateTool = struct {
             const api_key = ac.api_key orelse self.fallback_api_key;
             const sys_prompt = ac.system_prompt orelse "You are a helpful assistant. Respond concisely.";
 
-            const cfg = .{
-                .api_key = api_key,
-                .default_provider = ac.provider,
-                .default_model = @as(?[]const u8, ac.model),
-                .temperature = ac.temperature orelse @as(f64, 0.7),
-                .max_tokens = @as(?u64, null),
-            };
+            var models_to_try: std.ArrayListUnmanaged([]const u8) = .empty;
+            defer models_to_try.deinit(allocator);
+            try models_to_try.append(allocator, ac.model);
 
-            const response = providers.completeWithSystem(allocator, &cfg, sys_prompt, full_prompt) catch |err| {
-                const msg = std.fmt.allocPrint(
-                    allocator,
-                    "Delegation to agent '{s}' failed: {s}",
-                    .{ trimmed_agent, @errorName(err) },
-                ) catch return ToolResult.fail("Delegation failed");
-                return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            };
+            const fallback_limit: usize = if (self.max_model_fallback_hops == 0)
+                ac.fallback_models.len
+            else
+                @min(ac.fallback_models.len, @as(usize, @intCast(self.max_model_fallback_hops)));
+            for (ac.fallback_models[0..fallback_limit]) |fb| {
+                try models_to_try.append(allocator, fb);
+            }
 
-            return ToolResult{ .success = true, .output = response };
+            var last_err: ?anyerror = null;
+            for (models_to_try.items) |model_name| {
+                const cfg = DelegateCompletionConfig{
+                    .api_key = api_key,
+                    .default_provider = ac.provider,
+                    .default_model = model_name,
+                    .temperature = ac.temperature orelse @as(f64, 0.7),
+                    .max_tokens = @as(?u64, null),
+                };
+
+                const response = self.complete_with_system_fn(allocator, &cfg, sys_prompt, full_prompt) catch |err| {
+                    last_err = err;
+                    continue;
+                };
+                return ToolResult{ .success = true, .output = response };
+            }
+
+            var attempts: std.ArrayListUnmanaged(u8) = .empty;
+            defer attempts.deinit(allocator);
+            const attempts_writer = attempts.writer(allocator);
+            for (models_to_try.items, 0..) |m, i| {
+                if (i > 0) try attempts_writer.writeAll(", ");
+                try attempts_writer.writeAll(m);
+            }
+            const attempts_owned = try attempts.toOwnedSlice(allocator);
+            defer allocator.free(attempts_owned);
+            const err_name = if (last_err) |e| @errorName(e) else "AllProvidersFailed";
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "Delegation to agent '{s}' failed after models [{s}]: {s}",
+                .{ trimmed_agent, attempts_owned, err_name },
+            ) catch return ToolResult.fail("Delegation failed");
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
         }
 
         // Fallback: no agent config found — load global config
@@ -289,6 +344,83 @@ test "delegate with context field handles missing provider gracefully" {
     }
 }
 
+test "delegate uses fallback_models when primary model fails" {
+    const Mock = struct {
+        fn complete(
+            allocator: std.mem.Allocator,
+            cfg: *const DelegateCompletionConfig,
+            _: []const u8,
+            _: []const u8,
+        ) anyerror![]const u8 {
+            const model = cfg.default_model orelse "";
+            if (std.mem.eql(u8, model, "gpt-main")) return error.ProviderError;
+            return std.fmt.allocPrint(allocator, "ok:{s}", .{model});
+        }
+    };
+
+    const fallback_models = [_][]const u8{"gpt-backup"};
+    const agents = [_]NamedAgentConfig{.{
+        .name = "coder",
+        .provider = "openai",
+        .model = "gpt-main",
+        .fallback_models = &fallback_models,
+    }};
+    var dt = DelegateTool{
+        .agents = &agents,
+        .complete_with_system_fn = Mock.complete,
+    };
+    const t = dt.tool();
+    const parsed = try root.parseTestArgs("{\"agent\": \"coder\", \"prompt\": \"Write code\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| if (e.len > 0) std.testing.allocator.free(e);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("ok:gpt-backup", result.output);
+}
+
+test "delegate respects max_model_fallback_hops" {
+    const Mock = struct {
+        fn complete(
+            allocator: std.mem.Allocator,
+            cfg: *const DelegateCompletionConfig,
+            _: []const u8,
+            _: []const u8,
+        ) anyerror![]const u8 {
+            const model = cfg.default_model orelse "";
+            if (std.mem.eql(u8, model, "model-c")) {
+                return std.fmt.allocPrint(allocator, "ok:{s}", .{model});
+            }
+            return error.ProviderError;
+        }
+    };
+
+    const fallback_models = [_][]const u8{ "model-b", "model-c" };
+    const agents = [_]NamedAgentConfig{.{
+        .name = "planner",
+        .provider = "openai",
+        .model = "model-a",
+        .fallback_models = &fallback_models,
+    }};
+    var dt = DelegateTool{
+        .agents = &agents,
+        .max_model_fallback_hops = 1,
+        .complete_with_system_fn = Mock.complete,
+    };
+    const t = dt.tool();
+    const parsed = try root.parseTestArgs("{\"agent\": \"planner\", \"prompt\": \"Plan\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    defer if (result.error_msg) |e| if (e.len > 0) std.testing.allocator.free(e);
+
+    try std.testing.expect(!result.success);
+    try std.testing.expect(result.error_msg != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "model-a, model-b") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "model-c") == null);
+}
+
 // ── Depth enforcement tests ─────────────────────────────────────
 
 test "delegate depth limit enforced" {
@@ -387,11 +519,13 @@ test "delegate agents config stored" {
     var dt = DelegateTool{
         .agents = &agents,
         .fallback_api_key = "sk-test",
+        .max_model_fallback_hops = 2,
         .depth = 1,
     };
     try std.testing.expectEqual(@as(usize, 1), dt.agents.len);
     try std.testing.expectEqualStrings("test", dt.agents[0].name);
     try std.testing.expectEqualStrings("sk-test", dt.fallback_api_key.?);
+    try std.testing.expectEqual(@as(u32, 2), dt.max_model_fallback_hops);
     try std.testing.expectEqual(@as(u32, 1), dt.depth);
     _ = dt.tool(); // ensure tool() works
 }

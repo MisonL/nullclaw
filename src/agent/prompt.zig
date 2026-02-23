@@ -18,6 +18,7 @@ pub const PromptContext = struct {
     model_name: []const u8,
     tools: []const Tool,
     skills_prompt_limits: config_types.SkillsPromptLimits = .{},
+    plugin_prompt_patch: ?[]const u8 = null,
 };
 
 /// Build the full system prompt from workspace identity files, tools, and runtime context.
@@ -59,6 +60,15 @@ pub fn buildSystemPrompt(
         runtime_label,
         ctx.model_name,
     });
+
+    if (ctx.plugin_prompt_patch) |patch| {
+        if (patch.len > 0) {
+            try w.writeAll("## Plugin Patches\n\n");
+            try w.writeAll(patch);
+            if (!std.mem.endsWith(u8, patch, "\n")) try w.writeAll("\n");
+            try w.writeAll("\n");
+        }
+    }
 
     return try buf.toOwnedSlice(allocator);
 }

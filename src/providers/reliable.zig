@@ -166,6 +166,8 @@ pub const ReliableProvider = struct {
     extras: []const ProviderEntry = &.{},
     /// Per-model fallback chains.
     model_fallbacks: []const ModelFallbackEntry = &.{},
+    /// 0 = unlimited; otherwise limit fallback attempts (excluding primary model).
+    max_model_fallback_hops: u32 = 0,
     /// List of provider names (for diagnostics/logging).
     provider_names: []const []const u8,
     max_retries: u32,
@@ -261,6 +263,14 @@ pub const ReliableProvider = struct {
         return r;
     }
 
+    /// Limit fallback attempts per request (excluding primary model).
+    /// `hops=0` keeps current unlimited behavior.
+    pub fn withMaxModelFallbackHops(self: ReliableProvider, hops: u32) ReliableProvider {
+        var r = self;
+        r.max_model_fallback_hops = hops;
+        return r;
+    }
+
     /// Returns the model chain for a given model: [model, fallback1, fallback2, ...].
     /// If no fallbacks configured for this model, returns a single-element slice.
     /// Caller must free the returned slice.
@@ -268,10 +278,14 @@ pub const ReliableProvider = struct {
         // Find fallbacks for this model
         for (self.model_fallbacks) |entry| {
             if (std.mem.eql(u8, entry.model, model)) {
+                const max_hops: usize = if (self.max_model_fallback_hops == 0)
+                    entry.fallbacks.len
+                else
+                    @min(entry.fallbacks.len, @as(usize, @intCast(self.max_model_fallback_hops)));
                 // Build chain: [model] ++ fallbacks
-                const chain = try allocator.alloc([]const u8, 1 + entry.fallbacks.len);
+                const chain = try allocator.alloc([]const u8, 1 + max_hops);
                 chain[0] = model;
-                for (entry.fallbacks, 0..) |fb, i| {
+                for (entry.fallbacks[0..max_hops], 0..) |fb, i| {
                     chain[1 + i] = fb;
                 }
                 return chain;
@@ -1374,6 +1388,20 @@ test "modelChain with fallbacks returns full chain" {
     try std.testing.expectEqualStrings("claude-haiku", chain[2]);
 }
 
+test "modelChain respects max fallback hops limit" {
+    const fallbacks = [_]ModelFallbackEntry{
+        .{ .model = "claude-opus", .fallbacks = &.{ "claude-sonnet", "claude-haiku", "claude-instant" } },
+    };
+    const reliable = ReliableProvider.init(&.{}, 0, 50).withModelFallbacks(&fallbacks).withMaxModelFallbackHops(2);
+    const chain = try reliable.modelChain(std.testing.allocator, "claude-opus");
+    defer std.testing.allocator.free(chain);
+
+    try std.testing.expect(chain.len == 3);
+    try std.testing.expectEqualStrings("claude-opus", chain[0]);
+    try std.testing.expectEqualStrings("claude-sonnet", chain[1]);
+    try std.testing.expectEqualStrings("claude-haiku", chain[2]);
+}
+
 test "modelChain with unrelated model returns single element" {
     const fallbacks = [_]ModelFallbackEntry{
         .{ .model = "claude-opus", .fallbacks = &.{"claude-sonnet"} },
@@ -1394,6 +1422,13 @@ test "withModelFallbacks builder preserves other fields" {
     try std.testing.expect(reliable.max_retries == 3);
     try std.testing.expect(reliable.base_backoff_ms == 200);
     try std.testing.expect(reliable.model_fallbacks.len == 1);
+}
+
+test "withMaxModelFallbackHops builder preserves other fields" {
+    const reliable = ReliableProvider.init(&.{}, 3, 200).withMaxModelFallbackHops(2);
+    try std.testing.expect(reliable.max_retries == 3);
+    try std.testing.expect(reliable.base_backoff_ms == 200);
+    try std.testing.expectEqual(@as(u32, 2), reliable.max_model_fallback_hops);
 }
 
 test "withExtras builder preserves other fields" {
@@ -1473,6 +1508,26 @@ test "model failover all models fail returns error" {
 
     const seen = mock.modelsSeen();
     try std.testing.expect(seen.len == 3);
+}
+
+test "model failover respects max fallback hops during chatWithSystem" {
+    const fail_models = [_][]const u8{ "model-a", "model-b" };
+    var mock = ModelAwareMock.initWithFailModels(&fail_models, "ok from model-c");
+    const fb = [_]ModelFallbackEntry{
+        .{ .model = "model-a", .fallbacks = &.{ "model-b", "model-c" } },
+    };
+    var reliable = ReliableProvider.initWithProvider(mock.toProvider(), 0, 50)
+        .withModelFallbacks(&fb)
+        .withMaxModelFallbackHops(1);
+    const prov = reliable.provider();
+
+    const result = prov.chatWithSystem(std.testing.allocator, null, "hello", "model-a", 0.7);
+    try std.testing.expectError(error.AllProvidersFailed, result);
+
+    const seen = mock.modelsSeen();
+    try std.testing.expectEqual(@as(usize, 2), seen.len);
+    try std.testing.expectEqualStrings("model-a", seen[0]);
+    try std.testing.expectEqualStrings("model-b", seen[1]);
 }
 
 test "supportsNativeTools returns true if any extra supports it" {

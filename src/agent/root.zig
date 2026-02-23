@@ -27,10 +27,12 @@ const ObserverEvent = observability.ObserverEvent;
 const hooks_mod = @import("../hooks.zig");
 const HookBus = hooks_mod.HookBus;
 const HookEvent = hooks_mod.HookEvent;
+const plugins_mod = @import("../plugins.zig");
 
 pub const dispatcher = @import("dispatcher.zig");
 pub const prompt = @import("prompt.zig");
 pub const memory_loader = @import("memory_loader.zig");
+pub const loop_detector = @import("loop_detector.zig");
 const cli_mod = @import("../channels/cli.zig");
 
 const ParsedToolCall = dispatcher.ParsedToolCall;
@@ -64,41 +66,10 @@ const CONTEXT_RECOVERY_MIN_HISTORY: usize = 6;
 /// Number of recent messages to keep during force compression.
 const CONTEXT_RECOVERY_KEEP: usize = 4;
 
-/// Tool-loop detection thresholds.
-const TOOL_LOOP_SIGNATURE_WINDOW: usize = 30;
-const TOOL_LOOP_WARN_REPEAT_STREAK: u32 = 3;
-const TOOL_LOOP_WARN_ABAB_STREAK: u32 = 2;
-const TOOL_LOOP_WARN_NO_PROGRESS_STREAK: u32 = 3;
-const TOOL_LOOP_CRITICAL_REPEAT_STREAK: u32 = 6;
-const TOOL_LOOP_CRITICAL_ABAB_STREAK: u32 = 3;
-const TOOL_LOOP_CRITICAL_NO_PROGRESS_STREAK: u32 = 6;
-
 const NormalizedCliLine = struct {
     text: []const u8,
     owned: bool,
 };
-
-fn hashParsedToolCalls(calls: []const ParsedToolCall) u64 {
-    var hasher = std.hash.Wyhash.init(0);
-    for (calls) |call| {
-        hasher.update(call.name);
-        hasher.update(&[_]u8{0x1f});
-        hasher.update(call.arguments_json);
-        hasher.update(&[_]u8{0x1e});
-        if (call.tool_call_id) |id| hasher.update(id);
-        hasher.update(&[_]u8{0x1d});
-    }
-    return hasher.final();
-}
-
-fn isAbabToolPattern(signatures: []const u64) bool {
-    if (signatures.len < 4) return false;
-    const a = signatures[signatures.len - 4];
-    const b = signatures[signatures.len - 3];
-    const c = signatures[signatures.len - 2];
-    const d = signatures[signatures.len - 1];
-    return a == c and b == d and a != b;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Agent
@@ -123,6 +94,7 @@ pub const Agent = struct {
     max_tokens: u32 = 4096,
     message_timeout_secs: u64 = 0,
     skills_prompt_limits: config_types.SkillsPromptLimits = .{},
+    plugins_config: config_types.PluginsConfig = .{},
     compaction_keep_recent: u32 = DEFAULT_COMPACTION_KEEP_RECENT,
     compaction_max_summary_chars: u32 = DEFAULT_COMPACTION_MAX_SUMMARY_CHARS,
     compaction_max_source_chars: u32 = DEFAULT_COMPACTION_MAX_SOURCE_CHARS,
@@ -148,6 +120,9 @@ pub const Agent = struct {
     context_was_compacted: bool = false,
     /// Optional internal lifecycle hooks (lightweight pub/sub bus).
     internal_hooks: ?*HookBus = null,
+
+    /// Agent tool loop and repetition detector
+    loop_detector: loop_detector.ToolLoopDetector,
 
     /// An owned copy of a ChatMessage, where content is heap-allocated.
     const OwnedMessage = struct {
@@ -195,7 +170,9 @@ pub const Agent = struct {
                 provider_i,
                 cfg.reliability.provider_retries,
                 cfg.reliability.provider_backoff_ms,
-            ).withModelFallbacks(cfg.reliability.model_fallbacks);
+            )
+                .withModelFallbacks(cfg.reliability.model_fallbacks)
+                .withMaxModelFallbackHops(cfg.reliability.max_model_fallback_hops);
             _ = rp.withProbePolicy(
                 cfg.reliability.model_fallback_cooldown_secs * 1000,
                 cfg.reliability.model_probe_interval_secs * 1000,
@@ -223,6 +200,7 @@ pub const Agent = struct {
             .max_tokens = cfg.max_tokens,
             .message_timeout_secs = cfg.agent.message_timeout_secs,
             .skills_prompt_limits = cfg.agent.skills_prompt_limits,
+            .plugins_config = cfg.plugins,
             .compaction_keep_recent = cfg.agent.compaction_keep_recent,
             .compaction_max_summary_chars = cfg.agent.compaction_max_summary_chars,
             .compaction_max_source_chars = cfg.agent.compaction_max_source_chars,
@@ -230,6 +208,7 @@ pub const Agent = struct {
             .total_tokens = 0,
             .has_system_prompt = false,
             .last_turn_compacted = false,
+            .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         };
     }
 
@@ -244,6 +223,7 @@ pub const Agent = struct {
         }
         self.history.deinit(self.allocator);
         self.allocator.free(self.tool_specs);
+        self.loop_detector.deinit();
     }
 
     pub fn setInternalHooks(self: *Agent, bus: ?*HookBus) void {
@@ -254,7 +234,11 @@ pub const Agent = struct {
         if (self.internal_hooks) |bus| {
             var evt = event;
             bus.emit(&evt);
+            plugins_mod.notifyHookObserversAsync(self.workspace_dir, self.plugins_config, &evt);
+            return;
         }
+        var evt = event;
+        plugins_mod.notifyHookObserversAsync(self.workspace_dir, self.plugins_config, &evt);
     }
 
     /// Build a compaction transcript from a slice of history messages.
@@ -515,11 +499,19 @@ pub const Agent = struct {
 
         // Inject system prompt on first turn
         if (!self.has_system_prompt) {
+            const plugin_patch = plugins_mod.collectPromptPatch(
+                self.allocator,
+                self.workspace_dir,
+                self.plugins_config,
+            ) catch null;
+            defer if (plugin_patch) |p| self.allocator.free(p);
+
             const system_prompt = try prompt.buildSystemPrompt(self.allocator, .{
                 .workspace_dir = self.workspace_dir,
                 .model_name = self.model_name,
                 .tools = self.tools,
                 .skills_prompt_limits = self.skills_prompt_limits,
+                .plugin_prompt_patch = plugin_patch,
             });
             defer self.allocator.free(system_prompt);
 
@@ -596,14 +588,13 @@ pub const Agent = struct {
         } };
         self.observer.recordEvent(&start_event);
 
+        // Tool-loop detection is scoped to the current user turn.
+        // Reset state here to avoid cross-turn false positives.
+        self.loop_detector.reset();
+
         // Tool call loop — reuse a single arena across iterations (retains pages)
         var iter_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer iter_arena.deinit();
-        var tool_signature_history: std.ArrayListUnmanaged(u64) = .empty;
-        defer tool_signature_history.deinit(self.allocator);
-        var repeated_signature_streak: u32 = 0;
-        var abab_streak: u32 = 0;
-        var no_progress_streak: u32 = 0;
         var used_tools_in_turn = false;
 
         var iteration: u32 = 0;
@@ -836,10 +827,18 @@ pub const Agent = struct {
                 };
             }
 
+            const effective_model = if (response.model.len > 0) response.model else self.model_name;
+            if (response.model.len > 0 and !std.mem.eql(u8, response.model, self.model_name)) {
+                self.emitHook(.{ .model_fallback = .{
+                    .requested_model = self.model_name,
+                    .active_model = response.model,
+                } });
+            }
+
             const duration_ms: u64 = @as(u64, @intCast(@max(0, std.time.milliTimestamp() - timer_start)));
             const resp_event = ObserverEvent{ .llm_response = .{
                 .provider = self.provider.getName(),
-                .model = self.model_name,
+                .model = effective_model,
                 .duration_ms = duration_ms,
                 .success = true,
                 .error_message = null,
@@ -970,52 +969,20 @@ pub const Agent = struct {
                 return final_text;
             }
 
-            const tool_signature = hashParsedToolCalls(parsed_calls);
-            try tool_signature_history.append(self.allocator, tool_signature);
-            if (tool_signature_history.items.len > TOOL_LOOP_SIGNATURE_WINDOW) {
-                const tail = tool_signature_history.items[1..];
-                std.mem.copyForwards(u64, tool_signature_history.items[0..tail.len], tail);
-                tool_signature_history.items.len -= 1;
-            }
+            const loop_state = try self.loop_detector.recordTurn(parsed_calls, display_text.len > 0);
+            const loop_warning = loop_state == .warning or loop_state == .critical;
+            const loop_critical = loop_state == .critical;
 
-            const history_len = tool_signature_history.items.len;
-            if (history_len >= 2 and
-                tool_signature_history.items[history_len - 1] == tool_signature_history.items[history_len - 2])
-            {
-                repeated_signature_streak += 1;
-            } else {
-                repeated_signature_streak = 1;
-            }
-
-            if (isAbabToolPattern(tool_signature_history.items)) {
-                abab_streak += 1;
-            } else {
-                abab_streak = 0;
-            }
-
-            if (display_text.len == 0) {
-                no_progress_streak += 1;
-            } else {
-                no_progress_streak = 0;
-            }
-
-            const loop_warning = repeated_signature_streak >= TOOL_LOOP_WARN_REPEAT_STREAK or
-                abab_streak >= TOOL_LOOP_WARN_ABAB_STREAK or
-                no_progress_streak >= TOOL_LOOP_WARN_NO_PROGRESS_STREAK;
-            const loop_critical = repeated_signature_streak >= TOOL_LOOP_CRITICAL_REPEAT_STREAK or
-                abab_streak >= TOOL_LOOP_CRITICAL_ABAB_STREAK or
-                no_progress_streak >= TOOL_LOOP_CRITICAL_NO_PROGRESS_STREAK;
-
-            if (loop_warning) {
+            if (loop_warning and !loop_critical) {
                 const warn_event = ObserverEvent{ .err = .{
                     .component = "agent.tool_loop",
                     .message = "warning",
                 } };
                 self.observer.recordEvent(&warn_event);
                 self.emitHook(.{ .tool_loop_warning = .{
-                    .repeat_streak = repeated_signature_streak,
-                    .abab_streak = abab_streak,
-                    .no_progress_streak = no_progress_streak,
+                    .repeat_streak = self.loop_detector.repeated_signature_streak,
+                    .abab_streak = self.loop_detector.abab_streak,
+                    .no_progress_streak = self.loop_detector.no_progress_streak,
                 } });
             }
 
@@ -1026,9 +993,9 @@ pub const Agent = struct {
                 } };
                 self.observer.recordEvent(&breaker_event);
                 self.emitHook(.{ .tool_loop_breaker = .{
-                    .repeat_streak = repeated_signature_streak,
-                    .abab_streak = abab_streak,
-                    .no_progress_streak = no_progress_streak,
+                    .repeat_streak = self.loop_detector.repeated_signature_streak,
+                    .abab_streak = self.loop_detector.abab_streak,
+                    .no_progress_streak = self.loop_detector.no_progress_streak,
                 } });
 
                 const breaker_text = "Stopped due to repeated tool-call loop without progress. Please refine the request or add constraints.";
@@ -1532,12 +1499,15 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     const tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{
         .http_enabled = cfg.http_request.enabled,
         .browser_enabled = cfg.browser.enabled,
+        .browser_config = cfg.browser,
         .mcp_tools = mcp_tools,
         .agents = cfg.agents,
         .fallback_api_key = cfg.defaultProviderKey(),
+        .max_model_fallback_hops = cfg.reliability.max_model_fallback_hops,
         .subagent_manager = &subagent_manager,
         .tools_config = cfg.tools,
         .security_config = cfg.security,
+        .plugins_config = cfg.plugins,
     });
     defer allocator.free(tools);
 
@@ -1806,6 +1776,7 @@ test "Agent trim history preserves system prompt" {
         .max_tool_iterations = 10,
         .max_history_messages = 5,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -1860,6 +1831,7 @@ test "Agent clear history" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = true,
@@ -1946,6 +1918,7 @@ test "Agent initial state" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -1973,6 +1946,7 @@ test "Agent tokens tracking" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2001,6 +1975,7 @@ test "Agent trimHistory no-op when under limit" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2036,6 +2011,7 @@ test "Agent trimHistory without system prompt" {
         .max_tool_iterations = 10,
         .max_history_messages = 3,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2071,6 +2047,7 @@ test "Agent clearHistory resets all state" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = true,
@@ -2115,6 +2092,7 @@ test "Agent buildMessageSlice" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2164,6 +2142,7 @@ test "Agent trimHistory keeps most recent messages" {
         .max_tool_iterations = 10,
         .max_history_messages = 3,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2207,6 +2186,7 @@ test "Agent clearHistory then add messages" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = true,
@@ -2410,6 +2390,7 @@ fn makeTestAgent(allocator: std.mem.Allocator) !Agent {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2616,6 +2597,7 @@ fn makeStreamingAgent(
         .max_tool_iterations = 6,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
         .history = .empty,
         .total_tokens = 0,
         .has_system_prompt = false,
@@ -2820,6 +2802,140 @@ test "Agent hooks emit stream_fallback for empty streaming response" {
 
     try std.testing.expectEqualStrings("fallback reply", response);
     try std.testing.expectEqual(@as(usize, 1), hook_capture.stream_fallback);
+}
+
+test "Agent hooks emit model_fallback when provider returns different active model" {
+    const FallbackModelProvider = struct {
+        pub fn provider(self: *@This()) Provider {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        const vtable = Provider.VTable{
+            .chatWithSystem = chatWithSystemImpl,
+            .chat = chatImpl,
+            .supportsNativeTools = supportsNativeToolsImpl,
+            .getName = getNameImpl,
+            .deinit = deinitImpl,
+        };
+
+        fn chatWithSystemImpl(
+            _: *anyopaque,
+            allocator: std.mem.Allocator,
+            _: ?[]const u8,
+            _: []const u8,
+            _: []const u8,
+            _: f64,
+        ) anyerror![]const u8 {
+            return allocator.dupe(u8, "");
+        }
+
+        fn chatImpl(
+            _: *anyopaque,
+            allocator: std.mem.Allocator,
+            _: ChatRequest,
+            _: []const u8,
+            _: f64,
+        ) anyerror!ChatResponse {
+            return .{
+                .content = try allocator.dupe(u8, "ok"),
+                .tool_calls = &.{},
+                .usage = .{},
+                .model = try allocator.dupe(u8, "fallback-model"),
+            };
+        }
+
+        fn supportsNativeToolsImpl(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn getNameImpl(_: *anyopaque) []const u8 {
+            return "fallback-model-provider";
+        }
+
+        fn deinitImpl(_: *anyopaque) void {}
+    };
+
+    const HookCapture = struct {
+        fallback_count: usize = 0,
+        requested_model_ok: bool = false,
+        active_model_ok: bool = false,
+
+        fn onEvent(ctx_ptr: *anyopaque, event: *const HookEvent) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            if (event.* == .model_fallback) {
+                self.fallback_count += 1;
+                self.requested_model_ok = std.mem.eql(u8, event.model_fallback.requested_model, "test-model");
+                self.active_model_ok = std.mem.eql(u8, event.model_fallback.active_model, "fallback-model");
+            }
+        }
+    };
+
+    const ObserverCapture = struct {
+        saw_expected_model: bool = false,
+
+        const vtable = observability.Observer.VTable{
+            .record_event = recordEvent,
+            .record_metric = recordMetric,
+            .flush = flushImpl,
+            .name = nameImpl,
+        };
+
+        fn observer(self: *@This()) observability.Observer {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        fn recordEvent(ptr: *anyopaque, event: *const observability.ObserverEvent) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            switch (event.*) {
+                .llm_response => |resp| {
+                    if (std.mem.eql(u8, resp.model, "fallback-model")) {
+                        self.saw_expected_model = true;
+                    }
+                },
+                else => {},
+            }
+        }
+
+        fn recordMetric(_: *anyopaque, _: *const observability.ObserverMetric) void {}
+        fn flushImpl(_: *anyopaque) void {}
+        fn nameImpl(_: *anyopaque) []const u8 {
+            return "observer-capture";
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
+    var provider_state = FallbackModelProvider{};
+    const no_tools = [_]Tool{};
+    var agent = try makeStreamingAgent(allocator, provider_state.provider(), &no_tools, workspace_dir);
+    defer agent.deinit();
+    var observer_capture = ObserverCapture{};
+    agent.observer = observer_capture.observer();
+
+    var hook_bus = HookBus.init(allocator);
+    defer hook_bus.deinit();
+    var hook_capture = HookCapture{};
+    _ = try hook_bus.subscribe(.model_fallback, HookCapture.onEvent, @ptrCast(&hook_capture));
+    agent.setInternalHooks(&hook_bus);
+
+    const response = try agent.turn("hello fallback-model");
+    defer allocator.free(response);
+
+    try std.testing.expectEqualStrings("ok", response);
+    try std.testing.expectEqual(@as(usize, 1), hook_capture.fallback_count);
+    try std.testing.expect(hook_capture.requested_model_ok);
+    try std.testing.expect(hook_capture.active_model_ok);
+    try std.testing.expect(observer_capture.saw_expected_model);
 }
 
 test "slash /new clears history" {
@@ -3084,6 +3200,7 @@ test "Agent streaming fields default to null" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
     };
     defer agent.deinit();
 
@@ -3173,6 +3290,7 @@ test "Agent streaming fields can be set" {
         .max_tool_iterations = 10,
         .max_history_messages = 50,
         .auto_save = false,
+        .loop_detector = loop_detector.ToolLoopDetector.init(allocator, .{}),
     };
     defer agent.deinit();
 
@@ -3182,40 +3300,6 @@ test "Agent streaming fields can be set" {
 
     try std.testing.expect(agent.stream_callback != null);
     try std.testing.expect(agent.stream_ctx != null);
-}
-
-test "hashParsedToolCalls stable for same input" {
-    const calls_a = [_]ParsedToolCall{
-        .{ .name = "shell", .arguments_json = "{\"command\":\"ls\"}", .tool_call_id = "tc1" },
-        .{ .name = "file_read", .arguments_json = "{\"path\":\"a.txt\"}", .tool_call_id = "tc2" },
-    };
-    const calls_b = [_]ParsedToolCall{
-        .{ .name = "shell", .arguments_json = "{\"command\":\"ls\"}", .tool_call_id = "tc1" },
-        .{ .name = "file_read", .arguments_json = "{\"path\":\"a.txt\"}", .tool_call_id = "tc2" },
-    };
-    const calls_c = [_]ParsedToolCall{
-        .{ .name = "shell", .arguments_json = "{\"command\":\"pwd\"}", .tool_call_id = "tc1" },
-        .{ .name = "file_read", .arguments_json = "{\"path\":\"a.txt\"}", .tool_call_id = "tc2" },
-    };
-
-    const h1 = hashParsedToolCalls(&calls_a);
-    const h2 = hashParsedToolCalls(&calls_b);
-    const h3 = hashParsedToolCalls(&calls_c);
-
-    try std.testing.expectEqual(h1, h2);
-    try std.testing.expect(h1 != h3);
-}
-
-test "isAbabToolPattern detects pattern" {
-    const sigs_true = [_]u64{ 11, 22, 11, 22 };
-    const sigs_false_same = [_]u64{ 11, 11, 11, 11 };
-    const sigs_false_short = [_]u64{ 11, 22, 11 };
-    const sigs_false_diff = [_]u64{ 11, 22, 33, 22 };
-
-    try std.testing.expect(isAbabToolPattern(&sigs_true));
-    try std.testing.expect(!isAbabToolPattern(&sigs_false_same));
-    try std.testing.expect(!isAbabToolPattern(&sigs_false_short));
-    try std.testing.expect(!isAbabToolPattern(&sigs_false_diff));
 }
 
 const LoopBreakerProvider = struct {
@@ -3301,4 +3385,130 @@ test "Agent tool loop breaker stops repeated native tool calls" {
 
     try std.testing.expect(std.mem.indexOf(u8, response, "Stopped due to repeated tool-call loop") != null);
     try std.testing.expect(tool_state.calls < agent.max_tool_iterations);
+}
+
+const OneToolThenTextProvider = struct {
+    chat_calls: usize = 0,
+
+    pub fn provider(self: *OneToolThenTextProvider) Provider {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &vtable,
+        };
+    }
+
+    const vtable = Provider.VTable{
+        .chatWithSystem = chatWithSystemImpl,
+        .chat = chatImpl,
+        .supportsNativeTools = supportsNativeToolsImpl,
+        .getName = getNameImpl,
+        .deinit = deinitImpl,
+    };
+
+    fn chatWithSystemImpl(
+        _: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        _: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        return allocator.dupe(u8, "");
+    }
+
+    fn chatImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ChatRequest,
+        _: []const u8,
+        _: f64,
+    ) anyerror!ChatResponse {
+        const self: *OneToolThenTextProvider = @ptrCast(@alignCast(ptr));
+        self.chat_calls += 1;
+
+        if ((self.chat_calls % 2) == 1) {
+            const calls = try allocator.alloc(providers.ToolCall, 1);
+            calls[0] = .{
+                .id = try allocator.dupe(u8, "repeat_call"),
+                .name = try allocator.dupe(u8, "test_tool"),
+                .arguments = try allocator.dupe(u8, "{\"x\":1}"),
+            };
+            return .{
+                .content = null,
+                .tool_calls = calls,
+                .usage = .{},
+                .model = "",
+            };
+        }
+
+        return .{
+            .content = try allocator.dupe(u8, "done"),
+            .tool_calls = &.{},
+            .usage = .{},
+            .model = "",
+        };
+    }
+
+    fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn getNameImpl(_: *anyopaque) []const u8 {
+        return "one-tool-then-text-provider";
+    }
+
+    fn deinitImpl(_: *anyopaque) void {}
+};
+
+test "Agent tool loop detector resets between user turns" {
+    const HookCapture = struct {
+        warning_count: usize = 0,
+        breaker_count: usize = 0,
+
+        fn onEvent(ctx_ptr: *anyopaque, event: *const HookEvent) void {
+            const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            switch (event.*) {
+                .tool_loop_warning => self.warning_count += 1,
+                .tool_loop_breaker => self.breaker_count += 1,
+                else => {},
+            }
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
+    var provider_state = OneToolThenTextProvider{};
+    var tool_state = CountingTestTool{};
+    var tools = [_]Tool{tool_state.tool()};
+    var agent = try makeStreamingAgent(allocator, provider_state.provider(), &tools, workspace_dir);
+    defer agent.deinit();
+    try agent.history.append(allocator, .{
+        .role = .system,
+        .content = try allocator.dupe(u8, "system"),
+    });
+    agent.has_system_prompt = true;
+
+    var hook_bus = HookBus.init(allocator);
+    defer hook_bus.deinit();
+    var hook_capture = HookCapture{};
+    _ = try hook_bus.subscribe(null, HookCapture.onEvent, @ptrCast(&hook_capture));
+    agent.setInternalHooks(&hook_bus);
+
+    const r1 = try agent.turn("turn-1");
+    defer allocator.free(r1);
+    const r2 = try agent.turn("turn-2");
+    defer allocator.free(r2);
+    const r3 = try agent.turn("turn-3");
+    defer allocator.free(r3);
+
+    try std.testing.expectEqualStrings("done", r1);
+    try std.testing.expectEqualStrings("done", r2);
+    try std.testing.expectEqualStrings("done", r3);
+    try std.testing.expectEqual(@as(usize, 3), tool_state.calls);
+    try std.testing.expectEqual(@as(usize, 0), hook_capture.warning_count);
+    try std.testing.expectEqual(@as(usize, 0), hook_capture.breaker_count);
 }
