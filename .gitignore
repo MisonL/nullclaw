@@ -16,6 +16,8 @@ leak2.txt
 # Local analysis scratch files
 phase_a_b.patch
 Comprehensive Openclaw Analysis.md
+diff.txt
+replace_script.py
 
 # Editor/OS noise
 .vscode/
