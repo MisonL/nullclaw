@@ -131,6 +131,8 @@ pub const AgentConfig = struct {
     compaction_max_source_chars: u32 = 12_000,
     /// Max seconds to wait for an LLM HTTP response (curl --max-time). 0 = no limit.
     message_timeout_secs: u64 = 300,
+    /// Rebuild system prompt on every turn (allows runtime prompt_patch / skills limit updates).
+    refresh_system_prompt_each_turn: bool = false,
     skills_prompt_limits: SkillsPromptLimits = .{},
 };
 
@@ -284,6 +286,7 @@ pub const MemoryConfig = struct {
     snapshot_enabled: bool = false,
     snapshot_on_hygiene: bool = false,
     auto_hydrate: bool = true,
+    temporal_decay_half_life_days: f64 = 30.0,
 };
 
 // ── Tunnel config ───────────────────────────────────────────────

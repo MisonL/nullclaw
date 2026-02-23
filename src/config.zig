@@ -502,6 +502,7 @@ pub const Config = struct {
         try w.print("    \"compaction_max_summary_chars\": {d},\n", .{self.agent.compaction_max_summary_chars});
         try w.print("    \"compaction_max_source_chars\": {d},\n", .{self.agent.compaction_max_source_chars});
         try w.print("    \"message_timeout_secs\": {d},\n", .{self.agent.message_timeout_secs});
+        try w.print("    \"refresh_system_prompt_each_turn\": {s},\n", .{if (self.agent.refresh_system_prompt_each_turn) "true" else "false"});
         try w.print("    \"skills_prompt_limits\": {{\n", .{});
         try w.print("      \"max_skills_in_prompt\": {d},\n", .{self.agent.skills_prompt_limits.max_skills_in_prompt});
         try w.print("      \"max_skills_prompt_chars\": {d},\n", .{self.agent.skills_prompt_limits.max_skills_prompt_chars});
@@ -518,7 +519,8 @@ pub const Config = struct {
         try w.print("    \"hygiene_enabled\": {s},\n", .{if (self.memory.hygiene_enabled) "true" else "false"});
         try w.print("    \"archive_after_days\": {d},\n", .{self.memory.archive_after_days});
         try w.print("    \"purge_after_days\": {d},\n", .{self.memory.purge_after_days});
-        try w.print("    \"conversation_retention_days\": {d}\n", .{self.memory.conversation_retention_days});
+        try w.print("    \"conversation_retention_days\": {d},\n", .{self.memory.conversation_retention_days});
+        try w.print("    \"temporal_decay_half_life_days\": {d:.3}\n", .{self.memory.temporal_decay_half_life_days});
         try w.print("  }},\n", .{});
 
         // Gateway
@@ -956,7 +958,7 @@ test "json parse reliability cooldown and model fallback section" {
 test "json parse agent section" {
     const allocator = std.testing.allocator;
     const json =
-        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml", "skills_prompt_limits": {"max_skills_in_prompt": 9, "max_skills_prompt_chars": 12345, "max_skill_file_bytes": 8192, "max_candidates_per_root": 21, "max_skills_loaded_per_source": 7}}}
+        \\{"agent": {"compact_context": true, "max_tool_iterations": 20, "max_history_messages": 80, "parallel_tools": true, "tool_dispatcher": "xml", "refresh_system_prompt_each_turn": true, "skills_prompt_limits": {"max_skills_in_prompt": 9, "max_skills_prompt_chars": 12345, "max_skill_file_bytes": 8192, "max_candidates_per_root": 21, "max_skills_loaded_per_source": 7}}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -965,12 +967,25 @@ test "json parse agent section" {
     try std.testing.expectEqual(@as(u32, 80), cfg.agent.max_history_messages);
     try std.testing.expect(cfg.agent.parallel_tools);
     try std.testing.expectEqualStrings("xml", cfg.agent.tool_dispatcher);
+    try std.testing.expect(cfg.agent.refresh_system_prompt_each_turn);
     try std.testing.expectEqual(@as(u32, 9), cfg.agent.skills_prompt_limits.max_skills_in_prompt);
     try std.testing.expectEqual(@as(u32, 12345), cfg.agent.skills_prompt_limits.max_skills_prompt_chars);
     try std.testing.expectEqual(@as(u32, 8192), cfg.agent.skills_prompt_limits.max_skill_file_bytes);
     try std.testing.expectEqual(@as(u32, 21), cfg.agent.skills_prompt_limits.max_candidates_per_root);
     try std.testing.expectEqual(@as(u32, 7), cfg.agent.skills_prompt_limits.max_skills_loaded_per_source);
     allocator.free(cfg.agent.tool_dispatcher);
+}
+
+test "json parse memory temporal decay half life" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"memory":{"backend":"sqlite","temporal_decay_half_life_days":14.5}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+    try std.testing.expectEqualStrings("sqlite", cfg.memory.backend);
+    try std.testing.expectEqual(@as(f64, 14.5), cfg.memory.temporal_decay_half_life_days);
+    allocator.free(cfg.memory.backend);
 }
 
 test "json parse composio section" {
@@ -1073,6 +1088,7 @@ test "save writes agent skills prompt limits" {
     cfg.agent.skills_prompt_limits.max_skill_file_bytes = 4096;
     cfg.agent.skills_prompt_limits.max_candidates_per_root = 33;
     cfg.agent.skills_prompt_limits.max_skills_loaded_per_source = 8;
+    cfg.agent.refresh_system_prompt_each_turn = true;
 
     try cfg.save();
 
@@ -1085,6 +1101,31 @@ test "save writes agent skills prompt limits" {
     try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skill_file_bytes\": 4096") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"max_candidates_per_root\": 33") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"max_skills_loaded_per_source\": 8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"refresh_system_prompt_each_turn\": true") != null);
+}
+
+test "save writes memory temporal decay half life" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(base);
+    const config_path = try std.fs.path.join(allocator, &.{ base, "config.json" });
+    defer allocator.free(config_path);
+
+    var cfg = Config{
+        .workspace_dir = base,
+        .config_path = config_path,
+        .allocator = allocator,
+    };
+    cfg.memory.temporal_decay_half_life_days = 45.25;
+
+    try cfg.save();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, config_path, 128 * 1024);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"temporal_decay_half_life_days\": 45.250") != null);
 }
 
 test "save writes reliability max hops and agents fallback_models" {

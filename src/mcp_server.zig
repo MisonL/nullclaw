@@ -5,6 +5,7 @@ const session_mod = @import("session.zig");
 const observability = @import("observability.zig");
 const json_util = @import("json_util.zig");
 const hooks_mod = @import("hooks.zig");
+const tools_mod = @import("tools/root.zig");
 
 const ServerVersion = "0.1.1";
 
@@ -14,6 +15,11 @@ const CoreTool = enum {
     session_reset,
     session_list,
 };
+
+fn effectiveMaxConcurrentRequests(cfg: *const Config) u32 {
+    if (cfg.mcp.max_concurrent_requests == 0) return 1;
+    return cfg.mcp.max_concurrent_requests;
+}
 
 fn emitFrame(stdout: std.fs.File, payload: []const u8) !void {
     var header_buf: [128]u8 = undefined;
@@ -226,33 +232,38 @@ fn callCoreTool(
             const args = arguments orelse return mcpTextResult(allocator, "missing arguments", true);
             const message = getObjString(args, "message") orelse return mcpTextResult(allocator, "missing message", true);
             const session_key = getObjString(args, "session_key") orelse "mcp:default";
-            const started_ms = std.time.milliTimestamp();
-            const response = session_mgr.processMessage(session_key, message) catch |err| {
+            var result = session_mgr.processMessageDetailed(session_key, message, .{
+                .request_timeout_secs = request_timeout_secs,
+            }) catch |err| {
+                if (err == error.RequestTimeoutExceeded) {
+                    return mcpTextResult(allocator, "request timeout exceeded", true);
+                }
                 const msg = try std.fmt.allocPrint(allocator, "agent_turn failed: {s}", .{@errorName(err)});
                 defer allocator.free(msg);
                 return mcpTextResult(allocator, msg, true);
             };
-            defer allocator.free(response);
-            const latency = @as(i64, @intCast(std.time.milliTimestamp() - started_ms));
-            if (request_timeout_secs > 0 and latency > @as(i64, @intCast(request_timeout_secs * 1000))) {
-                return mcpTextResult(allocator, "request timeout exceeded", true);
-            }
+            defer result.deinit(allocator);
 
             var payload: std.ArrayListUnmanaged(u8) = .empty;
             errdefer payload.deinit(allocator);
             try payload.appendSlice(allocator, "{\"content\":[{\"type\":\"text\",\"text\":");
-            try json_util.appendJsonString(&payload, allocator, response);
+            try json_util.appendJsonString(&payload, allocator, result.response_text);
             try payload.appendSlice(allocator, "}],\"structuredContent\":{");
-            try json_util.appendJsonKeyValue(&payload, allocator, "text", response);
+            try json_util.appendJsonKeyValue(&payload, allocator, "text", result.response_text);
             try payload.appendSlice(allocator, ",");
-            try json_util.appendJsonKeyValue(&payload, allocator, "model", cfg.default_model orelse "(default)");
+            try json_util.appendJsonKeyValue(&payload, allocator, "model", result.active_model);
             try payload.appendSlice(allocator, ",");
             try json_util.appendJsonKey(&payload, allocator, "used_tools");
-            try payload.appendSlice(allocator, "[]");
+            try payload.appendSlice(allocator, "[");
+            for (result.used_tools, 0..) |tool_name, i| {
+                if (i > 0) try payload.appendSlice(allocator, ",");
+                try json_util.appendJsonString(&payload, allocator, tool_name);
+            }
+            try payload.appendSlice(allocator, "]");
             try payload.appendSlice(allocator, ",");
             try json_util.appendJsonKey(&payload, allocator, "latency_ms");
             var latency_buf: [32]u8 = undefined;
-            const latency_str = try std.fmt.bufPrint(&latency_buf, "{d}", .{latency});
+            const latency_str = try std.fmt.bufPrint(&latency_buf, "{d}", .{result.latency_ms});
             try payload.appendSlice(allocator, latency_str);
             try payload.appendSlice(allocator, "},\"isError\":false}");
 
@@ -372,6 +383,8 @@ pub fn serve(allocator: std.mem.Allocator, cfg: *const Config, hook_bus: ?*hooks
 
     const stdin = std.fs.File.stdin();
     const stdout = std.fs.File.stdout();
+    const max_concurrent_requests = effectiveMaxConcurrentRequests(cfg);
+    var active_requests: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
     while (true) {
         const maybe_body = readFrame(allocator, stdin) catch |err| switch (err) {
@@ -381,6 +394,20 @@ pub fn serve(allocator: std.mem.Allocator, cfg: *const Config, hook_bus: ?*hooks
         if (maybe_body == null) return;
         const body = maybe_body.?;
         defer allocator.free(body);
+
+        const active_before = active_requests.fetchAdd(1, .acq_rel);
+        if (active_before >= max_concurrent_requests) {
+            _ = active_requests.fetchSub(1, .acq_rel);
+            const parsed = std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch continue;
+            defer parsed.deinit();
+            if (parsed.value != .object) continue;
+            const id_value = parsed.value.object.get("id") orelse continue;
+            writeJsonRpcError(allocator, stdout, id_value, -32000, "server busy: max_concurrent_requests exceeded") catch {};
+            emitMcpRequest(hook_bus, "tools/call", false);
+            continue;
+        }
+        defer _ = active_requests.fetchSub(1, .acq_rel);
+
         handleRequest(allocator, cfg, &session_mgr, stdout, body, hook_bus) catch {};
     }
 }
@@ -395,4 +422,241 @@ test "getToolName resolves known methods" {
     try std.testing.expect(getToolName("agent_turn").? == .agent_turn);
     try std.testing.expect(getToolName("session_list").? == .session_list);
     try std.testing.expect(getToolName("unknown") == null);
+}
+
+test "effectiveMaxConcurrentRequests floors to one" {
+    var cfg = Config{
+        .workspace_dir = "/tmp/mcp_effective_max",
+        .config_path = "/tmp/mcp_effective_max/config.json",
+        .allocator = std.testing.allocator,
+    };
+    cfg.mcp.max_concurrent_requests = 0;
+    try std.testing.expectEqual(@as(u32, 1), effectiveMaxConcurrentRequests(&cfg));
+    cfg.mcp.max_concurrent_requests = 7;
+    try std.testing.expectEqual(@as(u32, 7), effectiveMaxConcurrentRequests(&cfg));
+}
+
+const TestMcpProviderMode = enum {
+    tool_then_done,
+};
+
+const TestMcpProvider = struct {
+    mode: TestMcpProviderMode = .tool_then_done,
+    calls: usize = 0,
+
+    const vtable = providers.Provider.VTable{
+        .chatWithSystem = chatWithSystemImpl,
+        .chat = chatImpl,
+        .supportsNativeTools = supportsNativeToolsImpl,
+        .getName = getNameImpl,
+        .deinit = deinitImpl,
+    };
+
+    fn provider(self: *TestMcpProvider) providers.Provider {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn chatWithSystemImpl(
+        _: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        _: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        return allocator.dupe(u8, "");
+    }
+
+    fn chatImpl(
+        ptr: *anyopaque,
+        allocator: std.mem.Allocator,
+        _: providers.ChatRequest,
+        _: []const u8,
+        _: f64,
+    ) anyerror!providers.ChatResponse {
+        const self: *TestMcpProvider = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        if (self.calls == 1) {
+            return .{
+                .content = try allocator.dupe(u8, "<tool_call>{\"name\":\"mcp_test_tool\",\"arguments\":{}}</tool_call>"),
+                .tool_calls = &.{},
+                .usage = .{},
+                .model = "",
+            };
+        }
+        return .{
+            .content = try allocator.dupe(u8, "done"),
+            .tool_calls = &.{},
+            .usage = .{},
+            .model = "",
+        };
+    }
+
+    fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn getNameImpl(_: *anyopaque) []const u8 {
+        return "mcp-test-provider";
+    }
+
+    fn deinitImpl(_: *anyopaque) void {}
+};
+
+const FastMcpTool = struct {
+    const vtable = tools_mod.Tool.VTable{
+        .execute = executeImpl,
+        .name = nameImpl,
+        .description = descriptionImpl,
+        .parameters_json = parametersImpl,
+    };
+
+    fn tool(self: *FastMcpTool) tools_mod.Tool {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn executeImpl(_: *anyopaque, _: std.mem.Allocator, _: tools_mod.JsonObjectMap) anyerror!tools_mod.ToolResult {
+        return .{ .success = true, .output = "ok" };
+    }
+
+    fn nameImpl(_: *anyopaque) []const u8 {
+        return "mcp_test_tool";
+    }
+
+    fn descriptionImpl(_: *anyopaque) []const u8 {
+        return "test tool";
+    }
+
+    fn parametersImpl(_: *anyopaque) []const u8 {
+        return "{\"type\":\"object\"}";
+    }
+};
+
+const SlowMcpTool = struct {
+    const vtable = tools_mod.Tool.VTable{
+        .execute = executeImpl,
+        .name = nameImpl,
+        .description = descriptionImpl,
+        .parameters_json = parametersImpl,
+    };
+
+    fn tool(self: *SlowMcpTool) tools_mod.Tool {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn executeImpl(_: *anyopaque, _: std.mem.Allocator, _: tools_mod.JsonObjectMap) anyerror!tools_mod.ToolResult {
+        std.Thread.sleep(1200 * std.time.ns_per_ms);
+        return .{ .success = true, .output = "ok" };
+    }
+
+    fn nameImpl(_: *anyopaque) []const u8 {
+        return "mcp_test_tool";
+    }
+
+    fn descriptionImpl(_: *anyopaque) []const u8 {
+        return "slow test tool";
+    }
+
+    fn parametersImpl(_: *anyopaque) []const u8 {
+        return "{\"type\":\"object\"}";
+    }
+};
+
+fn parseToolArguments(allocator: std.mem.Allocator, json_text: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+}
+
+test "callCoreTool agent_turn returns real used_tools and active model" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestMcpProvider{};
+    var tool_state = FastMcpTool{};
+    var tools = [_]tools_mod.Tool{tool_state.tool()};
+
+    var cfg = Config{
+        .workspace_dir = "/tmp/mcp_test",
+        .config_path = "/tmp/mcp_test/config.json",
+        .allocator = allocator,
+        .default_model = "unit-model",
+    };
+    var noop = observability.NoopObserver{};
+    var session_mgr = session_mod.SessionManager.init(
+        allocator,
+        &cfg,
+        provider_state.provider(),
+        &tools,
+        null,
+        noop.observer(),
+        null,
+    );
+    defer session_mgr.deinit();
+
+    const parsed_args = try parseToolArguments(allocator,
+        \\{"message":"please run tool","session_key":"mcp:test"}
+    );
+    defer parsed_args.deinit();
+
+    const result_json = try callCoreTool(
+        allocator,
+        &cfg,
+        &session_mgr,
+        .agent_turn,
+        parsed_args.value.object,
+        0,
+    );
+    defer allocator.free(result_json);
+
+    const parsed_result = try std.json.parseFromSlice(std.json.Value, allocator, result_json, .{});
+    defer parsed_result.deinit();
+    const root_obj = parsed_result.value.object;
+    const structured = root_obj.get("structuredContent").?.object;
+    const used_tools = structured.get("used_tools").?.array;
+    try std.testing.expectEqual(@as(usize, 1), used_tools.items.len);
+    try std.testing.expectEqualStrings("mcp_test_tool", used_tools.items[0].string);
+    try std.testing.expectEqualStrings("unit-model", structured.get("model").?.string);
+}
+
+test "callCoreTool agent_turn returns timeout when deadline exceeded" {
+    const allocator = std.testing.allocator;
+    var provider_state = TestMcpProvider{};
+    var tool_state = SlowMcpTool{};
+    var tools = [_]tools_mod.Tool{tool_state.tool()};
+
+    var cfg = Config{
+        .workspace_dir = "/tmp/mcp_timeout_test",
+        .config_path = "/tmp/mcp_timeout_test/config.json",
+        .allocator = allocator,
+    };
+    var noop = observability.NoopObserver{};
+    var session_mgr = session_mod.SessionManager.init(
+        allocator,
+        &cfg,
+        provider_state.provider(),
+        &tools,
+        null,
+        noop.observer(),
+        null,
+    );
+    defer session_mgr.deinit();
+
+    const parsed_args = try parseToolArguments(allocator,
+        \\{"message":"run slow tool","session_key":"mcp:timeout"}
+    );
+    defer parsed_args.deinit();
+
+    const result_json = try callCoreTool(
+        allocator,
+        &cfg,
+        &session_mgr,
+        .agent_turn,
+        parsed_args.value.object,
+        1,
+    );
+    defer allocator.free(result_json);
+
+    const parsed_result = try std.json.parseFromSlice(std.json.Value, allocator, result_json, .{});
+    defer parsed_result.deinit();
+    const root_obj = parsed_result.value.object;
+    try std.testing.expect(root_obj.get("isError").?.bool);
+    const text = root_obj.get("content").?.array.items[0].object.get("text").?.string;
+    try std.testing.expectEqualStrings("request timeout exceeded", text);
 }

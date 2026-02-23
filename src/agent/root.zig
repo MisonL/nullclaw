@@ -93,11 +93,15 @@ pub const Agent = struct {
     token_limit: u64 = 0,
     max_tokens: u32 = 4096,
     message_timeout_secs: u64 = 0,
+    refresh_system_prompt_each_turn: bool = false,
     skills_prompt_limits: config_types.SkillsPromptLimits = .{},
     plugins_config: config_types.PluginsConfig = .{},
     compaction_keep_recent: u32 = DEFAULT_COMPACTION_KEEP_RECENT,
     compaction_max_summary_chars: u32 = DEFAULT_COMPACTION_MAX_SUMMARY_CHARS,
     compaction_max_source_chars: u32 = DEFAULT_COMPACTION_MAX_SOURCE_CHARS,
+    turn_deadline_ms: ?i64 = null,
+    last_turn_active_model: ?[]const u8 = null,
+    last_turn_used_tools: std.ArrayListUnmanaged([]const u8) = .empty,
 
     /// Optional streaming callback. When set, turn() uses streamChat() for streaming providers.
     stream_callback: ?providers.StreamCallback = null,
@@ -199,6 +203,7 @@ pub const Agent = struct {
             .token_limit = cfg.agent.token_limit,
             .max_tokens = cfg.max_tokens,
             .message_timeout_secs = cfg.agent.message_timeout_secs,
+            .refresh_system_prompt_each_turn = cfg.agent.refresh_system_prompt_each_turn,
             .skills_prompt_limits = cfg.agent.skills_prompt_limits,
             .plugins_config = cfg.plugins,
             .compaction_keep_recent = cfg.agent.compaction_keep_recent,
@@ -217,6 +222,7 @@ pub const Agent = struct {
             self.allocator.destroy(rp);
             self.reliable_provider = null;
         }
+        self.clearLastTurnMetadata();
         if (self.model_name_owned) self.allocator.free(self.model_name);
         for (self.history.items) |*msg| {
             msg.deinit(self.allocator);
@@ -224,6 +230,85 @@ pub const Agent = struct {
         self.history.deinit(self.allocator);
         self.allocator.free(self.tool_specs);
         self.loop_detector.deinit();
+    }
+
+    pub fn setTurnTimeoutSeconds(self: *Agent, timeout_secs: u64) void {
+        if (timeout_secs == 0) {
+            self.turn_deadline_ms = null;
+            return;
+        }
+        const timeout_ms = timeout_secs * 1000;
+        self.turn_deadline_ms = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+    }
+
+    pub fn clearTurnTimeout(self: *Agent) void {
+        self.turn_deadline_ms = null;
+    }
+
+    pub fn duplicateLastTurnUsedTools(self: *const Agent, allocator: std.mem.Allocator) ![]const []const u8 {
+        if (self.last_turn_used_tools.items.len == 0) return allocator.alloc([]const u8, 0);
+        const copied = try allocator.alloc([]const u8, self.last_turn_used_tools.items.len);
+        var copied_count: usize = 0;
+        errdefer {
+            for (copied[0..copied_count]) |name| allocator.free(name);
+            allocator.free(copied);
+        }
+        for (self.last_turn_used_tools.items, 0..) |name, i| {
+            copied[i] = try allocator.dupe(u8, name);
+            copied_count += 1;
+        }
+        return copied;
+    }
+
+    pub fn duplicateLastTurnActiveModel(self: *const Agent, allocator: std.mem.Allocator) ![]const u8 {
+        if (self.last_turn_active_model) |model| return allocator.dupe(u8, model);
+        return allocator.dupe(u8, self.model_name);
+    }
+
+    fn clearLastTurnMetadata(self: *Agent) void {
+        if (self.last_turn_active_model) |model| {
+            self.allocator.free(model);
+            self.last_turn_active_model = null;
+        }
+        for (self.last_turn_used_tools.items) |name| {
+            self.allocator.free(name);
+        }
+        self.last_turn_used_tools.deinit(self.allocator);
+        self.last_turn_used_tools = .empty;
+    }
+
+    fn setLastTurnActiveModel(self: *Agent, model: []const u8) !void {
+        if (self.last_turn_active_model) |existing| {
+            self.allocator.free(existing);
+            self.last_turn_active_model = null;
+        }
+        self.last_turn_active_model = try self.allocator.dupe(u8, model);
+    }
+
+    fn recordUsedToolName(self: *Agent, name: []const u8) !void {
+        for (self.last_turn_used_tools.items) |existing| {
+            if (std.mem.eql(u8, existing, name)) return;
+        }
+        try self.last_turn_used_tools.append(self.allocator, try self.allocator.dupe(u8, name));
+    }
+
+    fn ensureWithinDeadline(self: *const Agent) !void {
+        if (self.turn_deadline_ms) |deadline_ms| {
+            if (std.time.milliTimestamp() >= deadline_ms) return error.RequestTimeoutExceeded;
+        }
+    }
+
+    fn requestTimeoutSecsForCall(self: *const Agent) u64 {
+        if (self.turn_deadline_ms) |deadline_ms| {
+            const now_ms = std.time.milliTimestamp();
+            if (now_ms >= deadline_ms) return 0;
+            const remaining_ms_i64 = deadline_ms - now_ms;
+            const remaining_ms: u64 = @intCast(remaining_ms_i64);
+            const remaining_secs = (remaining_ms + 999) / 1000;
+            if (self.message_timeout_secs == 0) return remaining_secs;
+            return @min(self.message_timeout_secs, remaining_secs);
+        }
+        return self.message_timeout_secs;
     }
 
     pub fn setInternalHooks(self: *Agent, bus: ?*HookBus) void {
@@ -239,6 +324,72 @@ pub const Agent = struct {
         }
         var evt = event;
         plugins_mod.notifyHookObserversAsync(self.workspace_dir, self.plugins_config, &evt);
+    }
+
+    fn ensureSystemPrompt(self: *Agent, native_tools_enabled: bool) !void {
+        if (!self.refresh_system_prompt_each_turn and self.has_system_prompt) return;
+
+        const had_system_prompt = self.has_system_prompt;
+        const plugin_patch = plugins_mod.collectPromptPatch(
+            self.allocator,
+            self.workspace_dir,
+            self.plugins_config,
+        ) catch null;
+        defer if (plugin_patch) |p| self.allocator.free(p);
+
+        const system_prompt = try prompt.buildSystemPrompt(self.allocator, .{
+            .workspace_dir = self.workspace_dir,
+            .model_name = self.model_name,
+            .tools = self.tools,
+            .skills_prompt_limits = self.skills_prompt_limits,
+            .plugin_prompt_patch = plugin_patch,
+        });
+        defer self.allocator.free(system_prompt);
+
+        const base_tool_instructions = try dispatcher.buildToolInstructions(self.allocator, self.tools);
+        defer self.allocator.free(base_tool_instructions);
+
+        const tool_instructions = if (native_tools_enabled)
+            try std.fmt.allocPrint(
+                self.allocator,
+                \\
+                \\## Native Tool Calling
+                \\Use the API's native function/tool-calling interface first whenever tools are needed.
+                \\If native tool-calling is unavailable for this model/provider, fall back to the XML protocol below.
+                \\
+                \\{s}
+            ,
+                .{base_tool_instructions},
+            )
+        else
+            try self.allocator.dupe(u8, base_tool_instructions);
+        defer self.allocator.free(tool_instructions);
+
+        const full_system = try self.allocator.alloc(u8, system_prompt.len + tool_instructions.len);
+        var full_system_owned = true;
+        errdefer if (full_system_owned) self.allocator.free(full_system);
+        @memcpy(full_system[0..system_prompt.len], system_prompt);
+        @memcpy(full_system[system_prompt.len..], tool_instructions);
+
+        if (had_system_prompt and self.history.items.len > 0 and self.history.items[0].role == .system) {
+            self.allocator.free(self.history.items[0].content);
+            self.history.items[0].content = full_system;
+            full_system_owned = false;
+        } else {
+            try self.history.insert(self.allocator, 0, .{
+                .role = .system,
+                .content = full_system,
+            });
+            full_system_owned = false;
+        }
+
+        self.has_system_prompt = true;
+        if (!had_system_prompt) {
+            self.emitHook(.{ .agent_bootstrap = .{
+                .model = self.model_name,
+                .workspace_dir = self.workspace_dir,
+            } });
+        }
     }
 
     /// Build a compaction transcript from a slice of history messages.
@@ -489,6 +640,7 @@ pub const Agent = struct {
     /// execute tools, and loop until a final text response is produced.
     pub fn turn(self: *Agent, user_message: []const u8) ![]const u8 {
         self.context_was_compacted = false;
+        self.clearLastTurnMetadata();
         const native_tools_enabled = self.provider.supportsNativeTools() and self.tool_specs.len > 0;
         self.emitHook(.{ .message_received = .{ .text = user_message } });
 
@@ -497,62 +649,7 @@ pub const Agent = struct {
             return response;
         }
 
-        // Inject system prompt on first turn
-        if (!self.has_system_prompt) {
-            const plugin_patch = plugins_mod.collectPromptPatch(
-                self.allocator,
-                self.workspace_dir,
-                self.plugins_config,
-            ) catch null;
-            defer if (plugin_patch) |p| self.allocator.free(p);
-
-            const system_prompt = try prompt.buildSystemPrompt(self.allocator, .{
-                .workspace_dir = self.workspace_dir,
-                .model_name = self.model_name,
-                .tools = self.tools,
-                .skills_prompt_limits = self.skills_prompt_limits,
-                .plugin_prompt_patch = plugin_patch,
-            });
-            defer self.allocator.free(system_prompt);
-
-            const base_tool_instructions = try dispatcher.buildToolInstructions(self.allocator, self.tools);
-            defer self.allocator.free(base_tool_instructions);
-
-            // Prefer native tool-calling where available, while retaining XML fallback
-            // for OpenAI-compatible gateways/models that ignore structured tools.
-            const tool_instructions = if (native_tools_enabled)
-                try std.fmt.allocPrint(
-                    self.allocator,
-                    \\
-                    \\## Native Tool Calling
-                    \\Use the API's native function/tool-calling interface first whenever tools are needed.
-                    \\If native tool-calling is unavailable for this model/provider, fall back to the XML protocol below.
-                    \\
-                    \\{s}
-                ,
-                    .{base_tool_instructions},
-                )
-            else
-                try self.allocator.dupe(u8, base_tool_instructions);
-            defer self.allocator.free(tool_instructions);
-
-            const full_system = try self.allocator.alloc(u8, system_prompt.len + tool_instructions.len);
-            var system_transferred = false;
-            errdefer if (!system_transferred) self.allocator.free(full_system);
-            @memcpy(full_system[0..system_prompt.len], system_prompt);
-            @memcpy(full_system[system_prompt.len..], tool_instructions);
-
-            try self.history.append(self.allocator, .{
-                .role = .system,
-                .content = full_system,
-            });
-            system_transferred = true;
-            self.has_system_prompt = true;
-            self.emitHook(.{ .agent_bootstrap = .{
-                .model = self.model_name,
-                .workspace_dir = self.workspace_dir,
-            } });
-        }
+        try self.ensureSystemPrompt(native_tools_enabled);
 
         // Auto-save user message to memory (timestamp-based key to avoid overwriting)
         if (self.auto_save) {
@@ -599,6 +696,7 @@ pub const Agent = struct {
 
         var iteration: u32 = 0;
         while (iteration < self.max_tool_iterations) : (iteration += 1) {
+            try self.ensureWithinDeadline();
             _ = iter_arena.reset(.retain_capacity);
             const arena = iter_arena.allocator();
 
@@ -627,7 +725,7 @@ pub const Agent = struct {
                             .temperature = self.temperature,
                             .max_tokens = self.max_tokens,
                             .tools = if (native_tools_enabled) self.tool_specs else null,
-                            .timeout_secs = self.message_timeout_secs,
+                            .timeout_secs = self.requestTimeoutSecsForCall(),
                         },
                         self.model_name,
                         self.temperature,
@@ -660,7 +758,7 @@ pub const Agent = struct {
                                 .temperature = self.temperature,
                                 .max_tokens = self.max_tokens,
                                 .tools = if (native_tools_enabled) self.tool_specs else null,
-                                .timeout_secs = self.message_timeout_secs,
+                                .timeout_secs = self.requestTimeoutSecsForCall(),
                             },
                             self.model_name,
                             self.temperature,
@@ -714,7 +812,7 @@ pub const Agent = struct {
                             .temperature = self.temperature,
                             .max_tokens = self.max_tokens,
                             .tools = if (native_tools_enabled) self.tool_specs else null,
-                            .timeout_secs = self.message_timeout_secs,
+                            .timeout_secs = self.requestTimeoutSecsForCall(),
                         },
                         self.model_name,
                         self.temperature,
@@ -747,7 +845,7 @@ pub const Agent = struct {
                         .temperature = self.temperature,
                         .max_tokens = self.max_tokens,
                         .tools = if (native_tools_enabled) self.tool_specs else null,
-                        .timeout_secs = self.message_timeout_secs,
+                        .timeout_secs = self.requestTimeoutSecsForCall(),
                     },
                     self.model_name,
                     self.temperature,
@@ -780,7 +878,7 @@ pub const Agent = struct {
                                 .temperature = self.temperature,
                                 .max_tokens = self.max_tokens,
                                 .tools = if (native_tools_enabled) self.tool_specs else null,
-                                .timeout_secs = self.message_timeout_secs,
+                                .timeout_secs = self.requestTimeoutSecsForCall(),
                             },
                             self.model_name,
                             self.temperature,
@@ -797,7 +895,7 @@ pub const Agent = struct {
                             .temperature = self.temperature,
                             .max_tokens = self.max_tokens,
                             .tools = if (native_tools_enabled) self.tool_specs else null,
-                            .timeout_secs = self.message_timeout_secs,
+                            .timeout_secs = self.requestTimeoutSecsForCall(),
                         },
                         self.model_name,
                         self.temperature,
@@ -816,7 +914,7 @@ pub const Agent = struct {
                                     .temperature = self.temperature,
                                     .max_tokens = self.max_tokens,
                                     .tools = if (native_tools_enabled) self.tool_specs else null,
-                                    .timeout_secs = self.message_timeout_secs,
+                                    .timeout_secs = self.requestTimeoutSecsForCall(),
                                 },
                                 self.model_name,
                                 self.temperature,
@@ -828,6 +926,8 @@ pub const Agent = struct {
             }
 
             const effective_model = if (response.model.len > 0) response.model else self.model_name;
+            try self.setLastTurnActiveModel(effective_model);
+            try self.ensureWithinDeadline();
             if (response.model.len > 0 and !std.mem.eql(u8, response.model, self.model_name)) {
                 self.emitHook(.{ .model_fallback = .{
                     .requested_model = self.model_name,
@@ -1057,6 +1157,8 @@ pub const Agent = struct {
             try results_buf.ensureTotalCapacity(self.allocator, parsed_calls.len);
 
             for (parsed_calls) |call| {
+                try self.ensureWithinDeadline();
+                try self.recordUsedToolName(call.name);
                 const tool_start_event = ObserverEvent{ .tool_call_start = .{ .tool = call.name } };
                 self.observer.recordEvent(&tool_start_event);
 
@@ -1274,6 +1376,7 @@ pub const Agent = struct {
         }
         self.history.items.len = 0;
         self.has_system_prompt = false;
+        self.clearLastTurnMetadata();
     }
 
     /// Get total tokens used.
@@ -1515,7 +1618,7 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     var mem_opt: ?Memory = null;
     const db_path = try std.fs.path.joinZ(allocator, &.{ cfg.workspace_dir, "memory.db" });
     defer allocator.free(db_path);
-    if (memory_mod.createMemory(allocator, cfg.memory.backend, db_path)) |mem| {
+    if (memory_mod.createMemoryWithConfig(allocator, cfg.memory.backend, db_path, cfg.memory)) |mem| {
         mem_opt = mem;
     } else |_| {}
 
@@ -2568,6 +2671,47 @@ const CountingTestTool = struct {
     }
 };
 
+const SlowCountingTestTool = struct {
+    calls: usize = 0,
+
+    pub fn tool(self: *SlowCountingTestTool) Tool {
+        return .{
+            .ptr = @ptrCast(self),
+            .vtable = &vtable,
+        };
+    }
+
+    const vtable = Tool.VTable{
+        .execute = executeImpl,
+        .name = nameImpl,
+        .description = descriptionImpl,
+        .parameters_json = paramsImpl,
+    };
+
+    fn executeImpl(
+        ptr: *anyopaque,
+        _: std.mem.Allocator,
+        _: tools_mod.JsonObjectMap,
+    ) anyerror!ToolResult {
+        const self: *SlowCountingTestTool = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        std.Thread.sleep(1200 * std.time.ns_per_ms);
+        return ToolResult.ok("ok");
+    }
+
+    fn nameImpl(_: *anyopaque) []const u8 {
+        return "test_tool";
+    }
+
+    fn descriptionImpl(_: *anyopaque) []const u8 {
+        return "slow test tool";
+    }
+
+    fn paramsImpl(_: *anyopaque) []const u8 {
+        return "{\"type\":\"object\"}";
+    }
+};
+
 fn makeStreamingAgent(
     allocator: std.mem.Allocator,
     provider_i: Provider,
@@ -2936,6 +3080,106 @@ test "Agent hooks emit model_fallback when provider returns different active mod
     try std.testing.expect(hook_capture.requested_model_ok);
     try std.testing.expect(hook_capture.active_model_ok);
     try std.testing.expect(observer_capture.saw_expected_model);
+}
+
+test "Agent turn captures unique used tools in metadata" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
+    var provider_state = StreamingTestProvider{ .scenario = .tool_then_text };
+    var tool_state = CountingTestTool{};
+    var tools = [_]Tool{tool_state.tool()};
+    var agent = try makeStreamingAgent(allocator, provider_state.provider(), &tools, workspace_dir);
+    defer agent.deinit();
+    try agent.history.append(allocator, .{
+        .role = .system,
+        .content = try allocator.dupe(u8, "system"),
+    });
+    agent.has_system_prompt = true;
+
+    var capture = StreamCapture{ .allocator = allocator };
+    defer capture.deinit();
+    agent.stream_callback = StreamCapture.onChunk;
+    agent.stream_ctx = @ptrCast(&capture);
+
+    const response = try agent.turn("run tool");
+    defer allocator.free(response);
+
+    const used_tools = try agent.duplicateLastTurnUsedTools(allocator);
+    defer {
+        for (used_tools) |name| allocator.free(name);
+        allocator.free(used_tools);
+    }
+    const active_model = try agent.duplicateLastTurnActiveModel(allocator);
+    defer allocator.free(active_model);
+
+    try std.testing.expectEqual(@as(usize, 1), used_tools.len);
+    try std.testing.expectEqualStrings("test_tool", used_tools[0]);
+    try std.testing.expectEqualStrings("test-model", active_model);
+}
+
+test "Agent turn returns RequestTimeoutExceeded when deadline elapses mid-turn" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
+    var provider_state = StreamingTestProvider{ .scenario = .tool_then_text };
+    var tool_state = SlowCountingTestTool{};
+    var tools = [_]Tool{tool_state.tool()};
+    var agent = try makeStreamingAgent(allocator, provider_state.provider(), &tools, workspace_dir);
+    defer agent.deinit();
+    try agent.history.append(allocator, .{
+        .role = .system,
+        .content = try allocator.dupe(u8, "system"),
+    });
+    agent.has_system_prompt = true;
+
+    var capture = StreamCapture{ .allocator = allocator };
+    defer capture.deinit();
+    agent.stream_callback = StreamCapture.onChunk;
+    agent.stream_ctx = @ptrCast(&capture);
+    agent.setTurnTimeoutSeconds(1);
+    defer agent.clearTurnTimeout();
+
+    try std.testing.expectError(error.RequestTimeoutExceeded, agent.turn("run slow tool"));
+    try std.testing.expectEqual(@as(usize, 1), tool_state.calls);
+}
+
+test "Agent refresh_system_prompt_each_turn replaces single system prompt entry" {
+    const allocator = std.testing.allocator;
+    var tmp_dir = std.testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const workspace_dir = try tmp_dir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(workspace_dir);
+
+    var provider_state = StreamingTestProvider{ .scenario = .empty_then_chat_text };
+    const no_tools = [_]Tool{};
+    var agent = try makeStreamingAgent(allocator, provider_state.provider(), &no_tools, workspace_dir);
+    defer agent.deinit();
+    agent.refresh_system_prompt_each_turn = true;
+
+    const first_response = try agent.turn("first");
+    defer allocator.free(first_response);
+    const first_system = try allocator.dupe(u8, agent.history.items[0].content);
+    defer allocator.free(first_system);
+
+    agent.model_name = "new-model";
+    const second_response = try agent.turn("second");
+    defer allocator.free(second_response);
+
+    var system_count: usize = 0;
+    for (agent.history.items) |msg| {
+        if (msg.role == .system) system_count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), system_count);
+    try std.testing.expect(!std.mem.eql(u8, first_system, agent.history.items[0].content));
+    try std.testing.expect(std.mem.indexOf(u8, agent.history.items[0].content, "new-model") != null);
 }
 
 test "slash /new clears history" {

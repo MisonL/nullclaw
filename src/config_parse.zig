@@ -451,6 +451,9 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             if (ag.object.get("message_timeout_secs")) |v| {
                 if (v == .integer) self.agent.message_timeout_secs = @intCast(v.integer);
             }
+            if (ag.object.get("refresh_system_prompt_each_turn")) |v| {
+                if (v == .bool) self.agent.refresh_system_prompt_each_turn = v.bool;
+            }
             if (ag.object.get("skills_prompt_limits")) |spl| {
                 if (spl == .object) {
                     if (spl.object.get("max_skills_in_prompt")) |v| {
@@ -585,6 +588,10 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
             }
             if (mem.object.get("auto_hydrate")) |v| {
                 if (v == .bool) self.memory.auto_hydrate = v.bool;
+            }
+            if (mem.object.get("temporal_decay_half_life_days")) |v| {
+                if (v == .float) self.memory.temporal_decay_half_life_days = v.float;
+                if (v == .integer) self.memory.temporal_decay_half_life_days = @floatFromInt(v.integer);
             }
         }
     }

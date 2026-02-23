@@ -8,6 +8,7 @@
 //!   - Document chunking for large markdown files
 
 const std = @import("std");
+const config_types = @import("../config_types.zig");
 
 pub const sqlite = @import("sqlite.zig");
 pub const markdown = @import("markdown.zig");
@@ -257,12 +258,23 @@ pub const CreateError = error{
 /// For markdown, pass workspace_dir as the path.
 /// For none, path is ignored.
 pub fn createMemory(allocator: std.mem.Allocator, backend_name: []const u8, path: [*:0]const u8) !Memory {
+    return createMemoryWithConfig(allocator, backend_name, path, .{});
+}
+
+pub fn createMemoryWithConfig(
+    allocator: std.mem.Allocator,
+    backend_name: []const u8,
+    path: [*:0]const u8,
+    memory_cfg: config_types.MemoryConfig,
+) !Memory {
     const kind = classifyBackend(backend_name);
     return switch (kind) {
         .sqlite_backend => {
             const impl_ = try allocator.create(SqliteMemory);
             errdefer allocator.destroy(impl_);
-            impl_.* = try SqliteMemory.init(allocator, path);
+            impl_.* = try SqliteMemory.initWithOptions(allocator, path, .{
+                .temporal_decay_half_life_days = memory_cfg.temporal_decay_half_life_days,
+            });
             return impl_.memory();
         },
         .markdown_backend => {
@@ -428,6 +440,16 @@ test "Memory convenience list accepts session_id" {
     const results2 = try m.list(std.testing.allocator, .core, "session-abc");
     defer std.testing.allocator.free(results2);
     try std.testing.expectEqual(@as(usize, 0), results2.len);
+}
+
+test "createMemoryWithConfig forwards sqlite temporal decay half life" {
+    var mem = try createMemoryWithConfig(std.testing.allocator, "sqlite", ":memory:", .{
+        .temporal_decay_half_life_days = 12.5,
+    });
+    defer mem.deinit();
+    const sqlite_mem = mem.asSqlite();
+    try std.testing.expect(sqlite_mem != null);
+    try std.testing.expectEqual(@as(f64, 12.5), sqlite_mem.?.temporal_decay_half_life_days);
 }
 
 test {

@@ -24,16 +24,25 @@ pub const SQLITE_STATIC: c.sqlite3_destructor_type = null;
 pub const SqliteMemory = struct {
     db: ?*c.sqlite3,
     allocator: std.mem.Allocator,
+    temporal_decay_half_life_days: f64,
 
     const Self = @This();
     const MMR_LAMBDA: f64 = 0.72;
-    const TEMPORAL_DECAY_HALF_LIFE_DAYS: f64 = 30.0;
+    const DEFAULT_TEMPORAL_DECAY_HALF_LIFE_DAYS: f64 = 30.0;
     const MAX_RECALL_CANDIDATE_MULTIPLIER: usize = 4;
     const MIN_RECALL_CANDIDATES: usize = 24;
     const MAX_RECALL_CANDIDATES: usize = 128;
     const LN_2: f64 = 0.6931471805599453;
 
+    pub const InitOptions = struct {
+        temporal_decay_half_life_days: f64 = DEFAULT_TEMPORAL_DECAY_HALF_LIFE_DAYS,
+    };
+
     pub fn init(allocator: std.mem.Allocator, db_path: [*:0]const u8) !Self {
+        return initWithOptions(allocator, db_path, .{});
+    }
+
+    pub fn initWithOptions(allocator: std.mem.Allocator, db_path: [*:0]const u8, options: InitOptions) !Self {
         var db: ?*c.sqlite3 = null;
         const rc = c.sqlite3_open(db_path, &db);
         if (rc != c.SQLITE_OK) {
@@ -41,7 +50,16 @@ pub const SqliteMemory = struct {
             return error.SqliteOpenFailed;
         }
 
-        var self_ = Self{ .db = db, .allocator = allocator };
+        const half_life_days = if (std.math.isFinite(options.temporal_decay_half_life_days) and options.temporal_decay_half_life_days > 0.0)
+            options.temporal_decay_half_life_days
+        else
+            DEFAULT_TEMPORAL_DECAY_HALF_LIFE_DAYS;
+
+        var self_ = Self{
+            .db = db,
+            .allocator = allocator,
+            .temporal_decay_half_life_days = half_life_days,
+        };
         try self_.configurePragmas();
         try self_.migrate();
         try self_.migrateSessionId();
@@ -547,7 +565,7 @@ pub const SqliteMemory = struct {
                     }
                 }
                 // BM25 returns lower-is-better values (often negative); convert to higher-is-better.
-                entry.score = computeTemporalRelevance(-score_raw, entry, created_epoch);
+                entry.score = self_.computeTemporalRelevance(-score_raw, entry, created_epoch);
                 try entries.append(allocator, entry);
             } else break;
         }
@@ -626,7 +644,7 @@ pub const SqliteMemory = struct {
                         continue;
                     }
                 }
-                entry.score = computeTemporalRelevance(1.0, entry, created_epoch);
+                entry.score = self_.computeTemporalRelevance(1.0, entry, created_epoch);
                 try entries.append(allocator, entry);
             } else break;
         }
@@ -726,19 +744,19 @@ pub const SqliteMemory = struct {
         return @min(with_min, MAX_RECALL_CANDIDATES);
     }
 
-    fn computeTemporalRelevance(base_score: f64, entry: MemoryEntry, created_epoch: i64) f64 {
+    fn computeTemporalRelevance(self: *const Self, base_score: f64, entry: MemoryEntry, created_epoch: i64) f64 {
         const safe_base = if (std.math.isFinite(base_score) and base_score > 0.0) base_score else 0.0;
         if (safe_base <= 0.0) return 0.0;
 
         // Core memories are treated as evergreen and are not time-decayed.
         const decay = switch (entry.category) {
             .core => 1.0,
-            else => computeTemporalDecayFactor(created_epoch),
+            else => self.computeTemporalDecayFactor(created_epoch),
         };
         return safe_base * decay;
     }
 
-    fn computeTemporalDecayFactor(created_epoch: i64) f64 {
+    fn computeTemporalDecayFactor(self: *const Self, created_epoch: i64) f64 {
         if (created_epoch <= 0) return 1.0;
 
         const now_ts = std.time.timestamp();
@@ -746,7 +764,7 @@ pub const SqliteMemory = struct {
 
         const age_seconds = now_ts - created_epoch;
         const age_days = @as(f64, @floatFromInt(age_seconds)) / 86400.0;
-        const raw = @exp((-LN_2 * age_days) / TEMPORAL_DECAY_HALF_LIFE_DAYS);
+        const raw = @exp((-LN_2 * age_days) / self.temporal_decay_half_life_days);
         if (!std.math.isFinite(raw)) return 1.0;
         return @max(0.0, @min(1.0, raw));
     }
@@ -1835,6 +1853,42 @@ test "sqlite temporal decay prefers fresh non-core memories" {
 
     try std.testing.expectEqual(@as(usize, 2), results.len);
     try std.testing.expectEqualStrings("fresh", results[0].key);
+}
+
+test "sqlite temporal decay half life option changes decay strength" {
+    var mem_short = try SqliteMemory.initWithOptions(std.testing.allocator, ":memory:", .{
+        .temporal_decay_half_life_days = 1.0,
+    });
+    defer mem_short.deinit();
+    var mem_long = try SqliteMemory.initWithOptions(std.testing.allocator, ":memory:", .{
+        .temporal_decay_half_life_days = 36500.0,
+    });
+    defer mem_long.deinit();
+
+    const ten_days_ago = std.time.timestamp() - (10 * 86400);
+    const short_decay = mem_short.computeTemporalDecayFactor(ten_days_ago);
+    const long_decay = mem_long.computeTemporalDecayFactor(ten_days_ago);
+    try std.testing.expect(short_decay < long_decay);
+}
+
+test "sqlite temporal decay half life invalid value falls back to default" {
+    var mem_invalid = try SqliteMemory.initWithOptions(std.testing.allocator, ":memory:", .{
+        .temporal_decay_half_life_days = -10.0,
+    });
+    defer mem_invalid.deinit();
+    try std.testing.expectEqual(
+        SqliteMemory.DEFAULT_TEMPORAL_DECAY_HALF_LIFE_DAYS,
+        mem_invalid.temporal_decay_half_life_days,
+    );
+
+    var mem_nan = try SqliteMemory.initWithOptions(std.testing.allocator, ":memory:", .{
+        .temporal_decay_half_life_days = std.math.nan(f64),
+    });
+    defer mem_nan.deinit();
+    try std.testing.expectEqual(
+        SqliteMemory.DEFAULT_TEMPORAL_DECAY_HALF_LIFE_DAYS,
+        mem_nan.temporal_decay_half_life_days,
+    );
 }
 
 test "sqlite mmr rerank reduces near-duplicate recall" {

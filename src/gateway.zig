@@ -764,7 +764,7 @@ pub fn runWithOptions(allocator: std.mem.Allocator, host: []const u8, port: u16,
             const db_path = std.fs.path.joinZ(allocator, &.{ cfg.workspace_dir, "memory.db" }) catch null;
             defer if (db_path) |p| allocator.free(p);
             if (db_path) |p| {
-                if (memory_mod.createMemory(allocator, cfg.memory.backend, p)) |mem| {
+                if (memory_mod.createMemoryWithConfig(allocator, cfg.memory.backend, p, cfg.memory)) |mem| {
                     mem_opt = mem;
                 } else |_| {}
             }

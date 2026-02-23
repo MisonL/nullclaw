@@ -42,6 +42,24 @@ pub const Session = struct {
     }
 };
 
+pub const ProcessMessageOptions = struct {
+    request_timeout_secs: u64 = 0,
+};
+
+pub const ProcessMessageResult = struct {
+    response_text: []const u8,
+    used_tools: []const []const u8 = &.{},
+    active_model: []const u8,
+    latency_ms: i64,
+
+    pub fn deinit(self: *ProcessMessageResult, allocator: Allocator) void {
+        allocator.free(self.response_text);
+        for (self.used_tools) |tool_name| allocator.free(tool_name);
+        allocator.free(self.used_tools);
+        allocator.free(self.active_model);
+    }
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SessionManager
 // ═══════════════════════════════════════════════════════════════════════════
@@ -146,14 +164,36 @@ pub const SessionManager = struct {
     /// Process a message within a session context.
     /// Finds or creates the session, locks it, runs agent.turn(), returns owned response.
     pub fn processMessage(self: *SessionManager, session_key: []const u8, content: []const u8) ![]const u8 {
+        const result = try self.processMessageDetailed(session_key, content, .{});
+        const response = result.response_text;
+        for (result.used_tools) |tool_name| self.allocator.free(tool_name);
+        self.allocator.free(result.used_tools);
+        self.allocator.free(result.active_model);
+        return response;
+    }
+
+    pub fn processMessageDetailed(
+        self: *SessionManager,
+        session_key: []const u8,
+        content: []const u8,
+        options: ProcessMessageOptions,
+    ) !ProcessMessageResult {
         const session = try self.getOrCreate(session_key);
 
         session.mutex.lock();
         defer session.mutex.unlock();
 
+        session.agent.skills_prompt_limits = self.config.agent.skills_prompt_limits;
+        session.agent.plugins_config = self.config.plugins;
+        session.agent.refresh_system_prompt_each_turn = self.config.agent.refresh_system_prompt_each_turn;
+        session.agent.setTurnTimeoutSeconds(options.request_timeout_secs);
+        defer session.agent.clearTurnTimeout();
+
+        const started_ms = std.time.milliTimestamp();
         const response = try session.agent.turn(content);
         session.turn_count += 1;
         session.last_active = std.time.timestamp();
+        const latency_ms = std.time.milliTimestamp() - started_ms;
 
         // Track consolidation timestamp
         if (session.agent.last_turn_compacted) {
@@ -175,7 +215,12 @@ pub const SessionManager = struct {
             }
         }
 
-        return response;
+        return .{
+            .response_text = response,
+            .used_tools = try session.agent.duplicateLastTurnUsedTools(self.allocator),
+            .active_model = try session.agent.duplicateLastTurnActiveModel(self.allocator),
+            .latency_ms = latency_ms,
+        };
     }
 
     /// Number of active sessions.
@@ -311,6 +356,127 @@ const MockProvider = struct {
     }
 
     fn mockDeinit(_: *anyopaque) void {}
+};
+
+const ToolFlowProvider = struct {
+    call_count: usize = 0,
+
+    const vtable = Provider.VTable{
+        .chatWithSystem = chatWithSystemImpl,
+        .chat = chatImpl,
+        .supportsNativeTools = supportsNativeToolsImpl,
+        .getName = getNameImpl,
+        .deinit = deinitImpl,
+    };
+
+    fn provider(self: *ToolFlowProvider) Provider {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn chatWithSystemImpl(
+        _: *anyopaque,
+        allocator: Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        _: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        return allocator.dupe(u8, "");
+    }
+
+    fn chatImpl(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        _: providers.ChatRequest,
+        _: []const u8,
+        _: f64,
+    ) anyerror!providers.ChatResponse {
+        const self: *ToolFlowProvider = @ptrCast(@alignCast(ptr));
+        self.call_count += 1;
+        if (self.call_count == 1) {
+            return .{
+                .content = try allocator.dupe(u8, "<tool_call>{\"name\":\"session_test_tool\",\"arguments\":{}}</tool_call>"),
+                .tool_calls = &.{},
+                .usage = .{},
+                .model = "",
+            };
+        }
+        return .{
+            .content = try allocator.dupe(u8, "done"),
+            .tool_calls = &.{},
+            .usage = .{},
+            .model = "",
+        };
+    }
+
+    fn supportsNativeToolsImpl(_: *anyopaque) bool {
+        return false;
+    }
+
+    fn getNameImpl(_: *anyopaque) []const u8 {
+        return "tool-flow-provider";
+    }
+
+    fn deinitImpl(_: *anyopaque) void {}
+};
+
+const SessionFastTool = struct {
+    const vtable = Tool.VTable{
+        .execute = executeImpl,
+        .name = nameImpl,
+        .description = descriptionImpl,
+        .parameters_json = parametersImpl,
+    };
+
+    fn tool(self: *SessionFastTool) Tool {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn executeImpl(_: *anyopaque, _: Allocator, _: tools_mod.JsonObjectMap) anyerror!tools_mod.ToolResult {
+        return .{ .success = true, .output = "ok" };
+    }
+
+    fn nameImpl(_: *anyopaque) []const u8 {
+        return "session_test_tool";
+    }
+
+    fn descriptionImpl(_: *anyopaque) []const u8 {
+        return "session test tool";
+    }
+
+    fn parametersImpl(_: *anyopaque) []const u8 {
+        return "{\"type\":\"object\"}";
+    }
+};
+
+const SessionSlowTool = struct {
+    const vtable = Tool.VTable{
+        .execute = executeImpl,
+        .name = nameImpl,
+        .description = descriptionImpl,
+        .parameters_json = parametersImpl,
+    };
+
+    fn tool(self: *SessionSlowTool) Tool {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn executeImpl(_: *anyopaque, _: Allocator, _: tools_mod.JsonObjectMap) anyerror!tools_mod.ToolResult {
+        std.Thread.sleep(1200 * std.time.ns_per_ms);
+        return .{ .success = true, .output = "ok" };
+    }
+
+    fn nameImpl(_: *anyopaque) []const u8 {
+        return "session_test_tool";
+    }
+
+    fn descriptionImpl(_: *anyopaque) []const u8 {
+        return "session slow test tool";
+    }
+
+    fn parametersImpl(_: *anyopaque) []const u8 {
+        return "{\"type\":\"object\"}";
+    }
 };
 
 /// Create a test SessionManager with mock provider.
@@ -674,6 +840,70 @@ test "session initial state includes last_consolidated" {
     try testing.expectEqual(@as(u64, 0), s.turn_count);
     try testing.expect(s.created_at > 0);
     try testing.expect(s.last_active > 0);
+}
+
+test "processMessageDetailed returns used_tools active_model and latency" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc_test",
+        .config_path = "/tmp/yc_test/config.json",
+        .allocator = testing.allocator,
+        .default_model = "session-model",
+    };
+    var provider = ToolFlowProvider{};
+    var tool_state = SessionFastTool{};
+    var tools = [_]Tool{tool_state.tool()};
+    var noop = observability.NoopObserver{};
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        provider.provider(),
+        &tools,
+        null,
+        noop.observer(),
+        null,
+    );
+    defer sm.deinit();
+
+    var result = try sm.processMessageDetailed("session:detailed", "run tool", .{});
+    defer result.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("done", result.response_text);
+    try testing.expectEqual(@as(usize, 1), result.used_tools.len);
+    try testing.expectEqualStrings("session_test_tool", result.used_tools[0]);
+    try testing.expectEqualStrings("session-model", result.active_model);
+    try testing.expect(result.latency_ms >= 0);
+}
+
+test "processMessageDetailed request timeout applies only to current call" {
+    const cfg = Config{
+        .workspace_dir = "/tmp/yc_test",
+        .config_path = "/tmp/yc_test/config.json",
+        .allocator = testing.allocator,
+        .default_model = "session-model",
+    };
+    var provider = ToolFlowProvider{};
+    var tool_state = SessionSlowTool{};
+    var tools = [_]Tool{tool_state.tool()};
+    var noop = observability.NoopObserver{};
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        provider.provider(),
+        &tools,
+        null,
+        noop.observer(),
+        null,
+    );
+    defer sm.deinit();
+
+    try testing.expectError(
+        error.RequestTimeoutExceeded,
+        sm.processMessageDetailed("session:timeout", "run slow tool", .{ .request_timeout_secs = 1 }),
+    );
+
+    var second = try sm.processMessageDetailed("session:timeout", "second turn", .{});
+    defer second.deinit(testing.allocator);
+    try testing.expectEqualStrings("done", second.response_text);
 }
 
 test "listSessionKeys returns active keys" {

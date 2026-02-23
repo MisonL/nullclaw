@@ -202,7 +202,7 @@ pub const ChannelRuntime = struct {
         const db_path = std.fs.path.joinZ(allocator, &.{ config.workspace_dir, "memory.db" }) catch null;
         defer if (db_path) |p| allocator.free(p);
         if (db_path) |p| {
-            if (memory_mod.createMemory(allocator, config.memory.backend, p)) |mem| {
+            if (memory_mod.createMemoryWithConfig(allocator, config.memory.backend, p, config.memory)) |mem| {
                 mem_opt = mem;
             } else |_| {}
         }
